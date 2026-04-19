@@ -142,6 +142,23 @@ Binaries land in `ggml/build/bin/`. The CPU build produces multiple
 `libggml-cpu-*.so` variants (SSE4.2 / AVX2 / AVX-512) selected at runtime.
 Keep the binaries and `.so` files together.
 
+### Vulkan backend (embedded / integrated-GPU targets)
+
+Add `-DLOCALVQE_VULKAN=ON` to the configure step. This composes with the
+CPU build — an additional `libggml-vulkan.so` is produced in
+`ggml/build/bin/` and the runtime loader picks it up when a Vulkan ICD is
+present, otherwise it falls back to the CPU variants.
+
+```bash
+cmake -S ggml -B ggml/build -DCMAKE_BUILD_TYPE=Release -DLOCALVQE_VULKAN=ON
+cmake --build ggml/build -j$(nproc)
+```
+
+The Nix flake's dev shell already includes `vulkan-loader`,
+`vulkan-headers`, and `shaderc`. Without Nix, install the equivalents
+from your distro (Debian: `libvulkan-dev vulkan-headers
+glslc`/`shaderc`).
+
 ## Running Inference
 
 ### CLI

@@ -7,6 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(LOCALVQE_BUILD_SHARED "Build shared library with C API" OFF)
 option(LOCALVQE_CUDA "Enable GGML CUDA backend" OFF)
+option(LOCALVQE_VULKAN "Enable GGML Vulkan backend" OFF)
 
 # Need PIC for everything when building shared lib (ggml static lib gets linked in)
 if(LOCALVQE_BUILD_SHARED)
@@ -33,6 +34,12 @@ else()
     # finds the CPU variant libraries next to the executable.
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "" FORCE)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "" FORCE)
+endif()
+if(LOCALVQE_VULKAN)
+    # Composes with the CPU-DL path above: Vulkan becomes a separate
+    # libggml-vulkan.so in build/bin/ that ggml_backend_load_all() picks up
+    # at runtime, falling back to the CPU variants when no Vulkan ICD is found.
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
 endif()
 add_subdirectory(vendor/ggml)
 

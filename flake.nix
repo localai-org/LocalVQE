@@ -15,6 +15,10 @@
           pkgs.gcc
           pkgs.pkg-config
           pkgs.libsndfile
+          # Optional: used when building with -DLOCALVQE_VULKAN=ON
+          pkgs.vulkan-loader
+          pkgs.vulkan-headers
+          pkgs.shaderc
         ];
       };
     };
