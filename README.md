@@ -205,6 +205,20 @@ coordinates so you can check whether outliers cluster at
 post-`localvqe_reset()` boundaries (cold path) or scatter through the
 stream (external contention). In practice we see the latter.
 
+Same measurement on Apple Silicon (M4, 4 P-cores + 6 E-cores, macOS 25.3),
+30 iters × 760 hops = 22 800 streaming hops per configuration, no active
+GPU contention:
+
+| Backend         | p50     | p99     | max      |
+|-----------------|--------:|--------:|---------:|
+| CPU — 1 thread  | 2.98 ms | 3.16 ms | 19.11 ms |
+| CPU — 2 threads | 1.82 ms | 1.93 ms |  3.17 ms |
+| CPU — 4 threads | 1.11 ms | 1.81 ms | 10.41 ms |
+
+The `max` outliers at 1 and 4 threads are single hops early in the first
+iteration (cold caches); p99 is representative of steady-state. 4 P-cores
+gives ~14× realtime on a single streaming context.
+
 ## Running Inference
 
 ### CLI
