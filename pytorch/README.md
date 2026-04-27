@@ -29,6 +29,13 @@ model.eval()
 state = torch.load("best.pt", map_location="cpu")
 model.load_state_dict(state["model"])
 
+# Bake the trained AlignBlock softmax temperature (carried in the
+# checkpoint as a buffer) into the smoothing-conv weights. The GGML
+# graph has no temperature parameter, so PyTorch inference must call
+# this to match its behavior; without it the model runs at the default
+# 1.0 and loses several dB of FE-ST ERLE on real recordings.
+model.align.fold_temperature()
+
 # Process a (mic, far) pair — shape (B, N_samples)
 with torch.no_grad():
     enhanced = model(mic_pcm, far_pcm)

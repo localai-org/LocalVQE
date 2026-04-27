@@ -20,7 +20,9 @@ class AlignBlock(nn.Module):
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.dmax = dmax
-        self.temperature = temperature
+        # Registered as a buffer so the trained value persists in state_dict.
+        # Mutate via .fill_(), never re-assign.
+        self.register_buffer("temperature", torch.tensor(float(temperature)))
 
         # Pointwise projections for Q and K
         self.pconv_mic = nn.Conv2d(in_channels, hidden_channels, 1)
@@ -37,6 +39,25 @@ class AlignBlock(nn.Module):
             nn.ZeroPad2d([1, 1, 4, 0]),  # causal
             nn.Conv2d(hidden_channels, 1, (5, 3)),
         )
+
+    def fold_temperature(self, temperature=None):
+        """Bake the AlignBlock softmax temperature into the smoothing-conv
+        weights.
+
+        Call after `load_state_dict`. With no argument, reads from
+        `self.temperature` (a buffer carried by the checkpoint, holding
+        the trained value). The GGML graph has no temperature parameter,
+        so PyTorch inference must call this to match its behavior;
+        without it the model runs at the default 1.0 and loses several
+        dB of FE-ST ERLE on real recordings.
+        """
+        t = float(temperature if temperature is not None else self.temperature)
+        if t == 1.0:
+            return
+        with torch.no_grad():
+            self.conv[1].weight.div_(t)
+            self.conv[1].bias.div_(t)
+            self.temperature.fill_(1.0)
 
     def forward(self, x_mic, x_ref, return_delay=False):
         """
