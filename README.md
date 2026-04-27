@@ -95,30 +95,9 @@ friendly, but quantized weights have not yet been calibrated and released.
 
 ## Validation Results
 
-### Synthetic validation split
-
-500 clips drawn from DNS5 + AEC Challenge synthetic data, stratified
-across 15 scenario cells. AECMOS over a 100-clip sub-sample per the
-standard AEC Challenge protocol.
-
-| Metric | Value |
-|---|---:|
-| ERLE (dB) | 11.4 |
-| AECMOS echo (↑, 1–5) | 3.83 |
-| AECMOS degradation (↑, 1–5) | 4.04 |
-
-- **ERLE** (Echo Return Loss Enhancement) — `10·log10(E[mic²] / E[enh²])`
-  averaged across scenarios. On scenes with active near-end speech both
-  numerator and denominator are dominated by speech, so the absolute
-  value understates echo-only removal.
-- **AECMOS** (Purin et al., ICASSP 2022) is Microsoft's non-intrusive AEC
-  quality predictor. "Echo" rates how well echo was removed; "degradation"
-  rates how clean the resulting speech is. 1–5 MOS scale, higher is better.
-
-### AEC Challenge 2022 blind set (real recordings)
-
 Stratified 150-sample eval (30 per scenario) on the
-[ICASSP 2022 AEC Challenge blind test set](https://github.com/microsoft/AEC-Challenge).
+[ICASSP 2022 AEC Challenge blind test set](https://github.com/microsoft/AEC-Challenge)
+— real recordings, not synthetic mixes.
 
 | Scenario | AECMOS echo | AECMOS deg | blind ERLE |
 |---|---:|---:|---:|
@@ -128,22 +107,17 @@ Stratified 150-sample eval (30 per scenario) on the
 | farend-singletalk-with-movement | 4.26 | 4.82 | 48.2 dB |
 | nearend-singletalk | 4.95 | 3.98 | 4.2 dB |
 
+- **AECMOS** (Purin et al., ICASSP 2022) is Microsoft's non-intrusive AEC
+  quality predictor. "Echo" rates how well echo was removed; "degradation"
+  rates how clean the resulting speech is. 1–5 MOS scale, higher is better.
+- **Blind ERLE** is `10·log10(E[mic²] / E[enh²])`. Only meaningful on
+  far-end single-talk where the input is echo-only; on scenes with active
+  near-end speech it understates echo removal because both numerator and
+  denominator are dominated by speech.
+
 ### GGUF integrity
 
     7ae478bdfd867dec60236e67b3b2239abb219f62e69566f64ca7b5118f5a4dba  localvqe-v1-1.3M-f32.gguf
-
-### Why DNSMOS OVRL is not reported here
-
-We track DNSMOS P.808 (`sig_bak_ovr.onnx`) in TensorBoard but are deliberately
-*not* publishing OVRL numbers for this model. The scores we obtain (around 2.0
-overall, 2.1 on single-talk far-end) contradict informal listening —
-single-talk far-end with ~48 dB of cancellation is audibly near-silent, not a
-"2-out-of-5" output. We suspect our DNSMOS invocation (input normalisation,
-silence handling, or ONNX model variant) is miscalibrated for AEC outputs
-and in particular for near-silent clips, which are out of distribution for a
-speech-quality predictor. Until we can reconcile the numbers with a
-DeepVQE-matching protocol we consider our OVRL numbers untrustworthy and
-omit them rather than publish misleading figures.
 
 ## Repository Layout
 
