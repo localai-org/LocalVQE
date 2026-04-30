@@ -101,11 +101,11 @@ Stratified 150-sample eval (30 per scenario) on the
 
 | Scenario | AECMOS echo | AECMOS deg | blind ERLE |
 |---|---:|---:|---:|
-| doubletalk | 4.73 | 2.09 | 11.4 dB |
-| doubletalk-with-movement | 4.72 | 2.35 | 8.3 dB |
-| farend-singletalk | 4.03 | 4.95 | 42.9 dB |
-| farend-singletalk-with-movement | 4.26 | 4.82 | 48.2 dB |
-| nearend-singletalk | 4.95 | 3.98 | 4.2 dB |
+| doubletalk | 4.71 | 2.35 | 8.5 dB |
+| doubletalk-with-movement | 4.67 | 2.33 | 8.1 dB |
+| farend-singletalk | 4.12 | 4.94 | 40.6 dB |
+| farend-singletalk-with-movement | 4.31 | 4.98 | 39.0 dB |
+| nearend-singletalk | 5.00 | 4.15 | 1.9 dB |
 
 - **AECMOS** (Purin et al., ICASSP 2022) is Microsoft's non-intrusive AEC
   quality predictor. "Echo" rates how well echo was removed; "degradation"
@@ -117,7 +117,7 @@ Stratified 150-sample eval (30 per scenario) on the
 
 ### GGUF integrity
 
-    f04930c099b310b82846da15b61b7926855ad7e200f31e4cc50e564ae589fa8b  localvqe-v1-1.3M-f32.gguf
+    d5eaf577449d0f920d8ee5e1042b8ddc7b6627313a042c62e2ada1b42719ab30  localvqe-v1-1.3M-f32.gguf
 
 ## Repository Layout
 
