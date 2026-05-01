@@ -38,8 +38,22 @@ struct dvqe_graph_model {
 
 /// Load model into GGML graph format. Weights stay as ggml_tensor*
 /// (potentially quantized). n_threads=0 means auto (nproc - 1, min 1).
+/// Defaults to the CPU backend, device 0.
 bool load_graph_model(const char* path, dvqe_graph_model& model,
                       bool verbose = true, int n_threads = 0);
+
+/// Same as load_graph_model() but with an explicit backend + device. Useful
+/// when ggml_backend_load_all() has registered multiple GPU backends and
+/// the caller wants to pick a specific one. backend_name matches
+/// ggml_backend_reg_name() (e.g. "CPU", "Vulkan", "CUDA").
+bool load_graph_model_ex(const char* path, dvqe_graph_model& model,
+                         const char* backend_name, int device_index,
+                         bool verbose, int n_threads);
+
+/// Print every registered backend + device to `out`. Indices passed to
+/// load_graph_model_ex() match the per-backend ordering printed here.
+/// Calls ggml_backend_load_all() lazily.
+void dvqe_list_devices(FILE* out);
 
 /// Free all resources.
 void free_graph_model(dvqe_graph_model& model);

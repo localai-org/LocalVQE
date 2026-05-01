@@ -32,9 +32,35 @@ extern "C" {
 
 /**
  * Create a new LocalVQE context by loading a GGUF model file.
- * Returns an opaque handle, or 0 on failure.
+ * Defaults to the CPU backend, device 0. Returns an opaque handle,
+ * or 0 on failure.
  */
 LOCALVQE_API uintptr_t localvqe_new(const char* model_path);
+
+/**
+ * Create a new context with explicit backend + device selection.
+ *
+ * backend_name:  matches ggml_backend_reg_name (e.g. "CPU", "Vulkan", "CUDA").
+ * device_index:  index into the chosen backend's device list (0-based).
+ *
+ * Use localvqe_list_devices() to see the available choices.
+ * Returns an opaque handle, or 0 on failure.
+ */
+LOCALVQE_API uintptr_t localvqe_new_ex(const char* model_path,
+                                       const char* backend_name,
+                                       int device_index);
+
+/**
+ * Print every registered backend + device to stderr. No model required.
+ * Useful for telling the user what to pass to localvqe_new_ex().
+ */
+LOCALVQE_API void localvqe_list_devices(void);
+
+/**
+ * Print memory budget + graph op-type histogram for the loaded model.
+ * Diagnostic only; cheap (no inference). Output goes to stdout.
+ */
+LOCALVQE_API void localvqe_print_profile(uintptr_t ctx);
 
 /**
  * Free a LocalVQE context and all associated resources.

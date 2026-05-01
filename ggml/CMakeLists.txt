@@ -120,6 +120,69 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp")
     add_executable(bench bench.cpp localvqe_api.cpp)
     target_link_libraries(bench PRIVATE dvqe_graph)
+
+    # `bench-run` — build bench, fetch the released F32 model + a doubletalk
+    # mic/ref WAV pair from HuggingFace, and run the benchmark. Intended for
+    # turnkey use on a fresh machine.
+    set(_bench_dir   ${CMAKE_BINARY_DIR}/bench_assets)
+    set(_bench_model ${_bench_dir}/localvqe-v1-1.3M-f32.gguf)
+    set(_bench_mic   ${_bench_dir}/dt_mic.wav)
+    set(_bench_ref   ${_bench_dir}/dt_ref.wav)
+    set(_dl_script   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/download_asset.cmake)
+
+    file(MAKE_DIRECTORY ${_bench_dir})
+
+    function(_dvqe_download OUTFILE URL SHA COMMENT_TEXT)
+        add_custom_command(OUTPUT ${OUTFILE}
+            COMMAND ${CMAKE_COMMAND}
+                -DURL=${URL}
+                -DOUTFILE=${OUTFILE}
+                -DEXPECTED_SHA256=${SHA}
+                -P ${_dl_script}
+            COMMENT "${COMMENT_TEXT}"
+            VERBATIM)
+    endfunction()
+
+    _dvqe_download(${_bench_model}
+        https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1-1.3M-f32.gguf
+        d5eaf577449d0f920d8ee5e1042b8ddc7b6627313a042c62e2ada1b42719ab30
+        "Fetching LocalVQE F32 model from HuggingFace")
+    _dvqe_download(${_bench_mic}
+        https://huggingface.co/spaces/LocalAI-io/LocalVQE-demo/resolve/main/examples/dt_mic.wav
+        8d0c15e56a4c7f387847451952123e8f23161520e81c1ba8878c922f11592a62
+        "Fetching doubletalk mic WAV")
+    _dvqe_download(${_bench_ref}
+        https://huggingface.co/spaces/LocalAI-io/LocalVQE-demo/resolve/main/examples/dt_ref.wav
+        e931d49e2802c1d7b15750caff1455495cd1dc40d27cb2fe51a8c58cbebe60fe
+        "Fetching doubletalk reference WAV")
+
+    add_custom_target(bench-assets
+        DEPENDS ${_bench_model} ${_bench_mic} ${_bench_ref})
+
+    set(BENCH_ITERS 10 CACHE STRING "Iterations for the bench-run target")
+    set(BENCH_BACKEND "CPU"
+        CACHE STRING "Backend for bench-run (e.g. CPU, Vulkan, CUDA)")
+    set(BENCH_DEVICE  "0"
+        CACHE STRING "Device index for bench-run (per-backend, see bench-list-devices)")
+    add_custom_target(bench-run
+        COMMAND $<TARGET_FILE:bench>
+            ${_bench_model}
+            --backend ${BENCH_BACKEND}
+            --device  ${BENCH_DEVICE}
+            --in-wav ${_bench_mic} ${_bench_ref}
+            --iters ${BENCH_ITERS}
+            --profile
+        DEPENDS bench bench-assets
+        WORKING_DIRECTORY ${_bench_dir}
+        USES_TERMINAL
+        VERBATIM)
+
+    add_custom_target(bench-list-devices
+        COMMAND $<TARGET_FILE:bench> --list-devices
+        DEPENDS bench
+        WORKING_DIRECTORY ${_bench_dir}
+        USES_TERMINAL
+        VERBATIM)
 endif()
 
 # Minimal conv2d test

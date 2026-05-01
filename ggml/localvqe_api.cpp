@@ -62,7 +62,9 @@ static void ensure_size(std::vector<float>& v, size_t n) {
 
 extern "C" {
 
-LOCALVQE_API uintptr_t localvqe_new(const char* model_path) {
+LOCALVQE_API uintptr_t localvqe_new_ex(const char* model_path,
+                                       const char* backend_name,
+                                       int device_index) {
     auto* ctx = new (std::nothrow) localvqe_ctx;
     if (!ctx) return 0;
 
@@ -70,7 +72,8 @@ LOCALVQE_API uintptr_t localvqe_new(const char* model_path) {
     const char* env_threads = std::getenv("GGML_NTHREADS");
     if (env_threads) n_threads = std::atoi(env_threads);
 
-    if (!load_graph_model(model_path, ctx->graph_model, false, n_threads)) {
+    if (!load_graph_model_ex(model_path, ctx->graph_model,
+                             backend_name, device_index, true, n_threads)) {
         delete ctx;
         return 0;
     }
@@ -93,6 +96,23 @@ LOCALVQE_API uintptr_t localvqe_new(const char* model_path) {
     ctx->s16_conv_buf.assign(3 * hop, 0.0f);
 
     return reinterpret_cast<uintptr_t>(ctx);
+}
+
+LOCALVQE_API uintptr_t localvqe_new(const char* model_path) {
+    return localvqe_new_ex(model_path, "CPU", 0);
+}
+
+LOCALVQE_API void localvqe_list_devices(void) {
+    dvqe_list_devices(stderr);
+}
+
+LOCALVQE_API void localvqe_print_profile(uintptr_t handle) {
+    if (!handle) return;
+    auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+    print_memory_budget(ctx->graph_model, ctx->stream_graph);
+    putchar('\n');
+    print_op_histogram(ctx->stream_graph.graph);
+    putchar('\n');
 }
 
 LOCALVQE_API void localvqe_free(uintptr_t handle) {

@@ -3,9 +3,10 @@
  * op histogram). Consumes 16 kHz WAV pairs through the C API.
  */
 
-#include "localvqe_graph.h"
 #include "localvqe_api.h"
 #include "common.h"
+
+#include "ggml.h"  // ggml_time_us
 
 #include <algorithm>
 #include <cmath>
@@ -13,16 +14,40 @@
 #include <string>
 #include <vector>
 
+static void usage(FILE* out) {
+    fprintf(out,
+        "Usage:\n"
+        "  bench --list-devices\n"
+        "  bench MODEL.gguf --backend NAME --device IDX \\\n"
+        "        --in-wav MIC.wav REF.wav [--iters N] [--profile]\n"
+        "\n"
+        "Run --list-devices first to see the (NAME, IDX) pairs available\n"
+        "on this machine. NAME matches the ggml backend name (e.g. CPU,\n"
+        "Vulkan, CUDA). IDX is the per-backend device index.\n");
+}
+
 int main(int argc, char** argv) {
-    const char* model_path = nullptr;
-    const char* mic_path   = nullptr;
-    const char* ref_path   = nullptr;
-    int iters    = 10;
-    bool profile = false;
+    const char* model_path   = nullptr;
+    const char* mic_path     = nullptr;
+    const char* ref_path     = nullptr;
+    const char* backend_name = nullptr;
+    int  device_index = -1;
+    int  iters        = 10;
+    bool profile      = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "--in-wav" && i + 2 < argc) {
+        if (arg == "--list-devices") {
+            localvqe_list_devices();
+            return 0;
+        } else if (arg == "-h" || arg == "--help") {
+            usage(stdout);
+            return 0;
+        } else if (arg == "--backend" && i + 1 < argc) {
+            backend_name = argv[++i];
+        } else if (arg == "--device" && i + 1 < argc) {
+            device_index = std::stoi(argv[++i]);
+        } else if (arg == "--in-wav" && i + 2 < argc) {
             mic_path = argv[++i]; ref_path = argv[++i];
         } else if (arg == "--iters" && i + 1 < argc) {
             iters = std::stoi(argv[++i]);
@@ -32,9 +57,10 @@ int main(int argc, char** argv) {
             model_path = argv[i];
         }
     }
-    if (!model_path || !mic_path || !ref_path) {
-        fprintf(stderr,
-            "Usage: bench model.gguf --in-wav mic.wav ref.wav [--iters N] [--profile]\n");
+
+    if (!model_path || !mic_path || !ref_path ||
+        !backend_name || device_index < 0) {
+        usage(stderr);
         return 1;
     }
 
@@ -53,22 +79,10 @@ int main(int argc, char** argv) {
     printf("Input: %d samples (%.2f s)\n", n, n / (float)SR);
     printf("Iterations: %d\n\n", iters);
 
-    if (profile) {
-        dvqe_graph_model tmp_m;
-        dvqe_stream_graph tmp_sg;
-        if (load_graph_model(model_path, tmp_m, false) &&
-            build_stream_graph(tmp_m, tmp_sg)) {
-            print_memory_budget(tmp_m, tmp_sg);
-            putchar('\n');
-            print_op_histogram(tmp_sg.graph);
-            putchar('\n');
-            free_stream_graph(tmp_sg);
-            free_graph_model(tmp_m);
-        }
-    }
-
-    uintptr_t ctx = localvqe_new(model_path);
+    uintptr_t ctx = localvqe_new_ex(model_path, backend_name, device_index);
     if (!ctx) { fprintf(stderr, "Failed to load model\n"); return 1; }
+
+    if (profile) localvqe_print_profile(ctx);
 
     std::vector<float> enh(n);
     int n_frames = n / HOP;

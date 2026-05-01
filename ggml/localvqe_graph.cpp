@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <thread>
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -492,8 +494,46 @@ static uint32_t gguf_u32(struct gguf_context* ctx, const char* key) {
     return idx >= 0 ? gguf_get_val_u32(ctx, idx) : 0;
 }
 
+static void ensure_backends_loaded() {
+    static std::once_flag f;
+    std::call_once(f, ggml_backend_load_all);
+}
+
+void dvqe_list_devices(FILE* out) {
+    ensure_backends_loaded();
+    size_t n_reg = ggml_backend_reg_count();
+    fprintf(out, "Registered backends (%zu):\n", n_reg);
+    for (size_t i = 0; i < n_reg; i++) {
+        ggml_backend_reg_t reg = ggml_backend_reg_get(i);
+        const char* rname = ggml_backend_reg_name(reg);
+        size_t n_dev = ggml_backend_reg_dev_count(reg);
+        fprintf(out, "  %s (%zu device%s)\n",
+                rname ? rname : "?", n_dev, n_dev == 1 ? "" : "s");
+        for (size_t j = 0; j < n_dev; j++) {
+            ggml_backend_dev_t dev = ggml_backend_reg_dev_get(reg, j);
+            const char* dn = ggml_backend_dev_name(dev);
+            const char* dd = ggml_backend_dev_description(dev);
+            const char* dt = "?";
+            switch (ggml_backend_dev_type(dev)) {
+                case GGML_BACKEND_DEVICE_TYPE_CPU:   dt = "CPU";   break;
+                case GGML_BACKEND_DEVICE_TYPE_GPU:   dt = "GPU";   break;
+                case GGML_BACKEND_DEVICE_TYPE_IGPU:  dt = "iGPU";  break;
+                case GGML_BACKEND_DEVICE_TYPE_ACCEL: dt = "ACCEL"; break;
+            }
+            fprintf(out, "    [%zu] %s — %s (%s)\n",
+                    j, dn ? dn : "?", dd ? dd : "?", dt);
+        }
+    }
+}
+
 bool load_graph_model(const char* path, dvqe_graph_model& model,
                       bool verbose, int n_threads) {
+    return load_graph_model_ex(path, model, "CPU", 0, verbose, n_threads);
+}
+
+bool load_graph_model_ex(const char* path, dvqe_graph_model& model,
+                         const char* backend_name, int device_index,
+                         bool verbose, int n_threads) {
     // Load GGUF metadata only — we'll allocate tensors on the backend buffer
     struct gguf_init_params params;
     params.no_alloc = true;
@@ -501,6 +541,8 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
 
     struct gguf_context* gctx = gguf_init_from_file(path, params);
     if (!gctx) { fprintf(stderr, "Failed to load: %s\n", path); return false; }
+    std::unique_ptr<gguf_context, decltype(&gguf_free)> gctx_guard(gctx, gguf_free);
+    auto fail = [&]() { free_graph_model(model); return false; };
 
     // Read hyperparameters
     auto& hp = model.hparams;
@@ -549,56 +591,57 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
                model.weights.size(), hp.n_fft, hp.dmax);
     }
 
-    // Load dynamic backends (CPU variants with different ISA support).
-    // Searches: GGML_BACKEND_DIR (compile-time), executable dir, current dir.
-    static bool backends_loaded = false;
-    if (!backends_loaded) {
-        ggml_backend_load_all();
-        backends_loaded = true;
-    }
+    ensure_backends_loaded();
 
-    // Initialize backend (try CUDA first, fall back to CPU)
-#ifdef GGML_USE_CUDA
-    if (ggml_backend_cuda_get_device_count() > 0) {
-        model.backend = ggml_backend_cuda_init(0);
-        if (verbose) printf("Using CUDA backend\n");
+    ggml_backend_reg_t reg = (backend_name && *backend_name)
+        ? ggml_backend_reg_by_name(backend_name) : nullptr;
+    if (!reg) {
+        fprintf(stderr, "localvqe: backend '%s' not registered\n",
+                backend_name ? backend_name : "(null)");
+        dvqe_list_devices(stderr);
+        return fail();
     }
-#endif
+    size_t n_dev = ggml_backend_reg_dev_count(reg);
+    if (device_index < 0 || (size_t)device_index >= n_dev) {
+        fprintf(stderr,
+            "localvqe: device %d out of range for backend '%s' (valid: 0..%zu)\n",
+            device_index, backend_name, n_dev ? n_dev - 1 : 0);
+        return fail();
+    }
+    ggml_backend_dev_t dev = ggml_backend_reg_dev_get(reg, (size_t)device_index);
+    model.backend = ggml_backend_dev_init(dev, nullptr);
     if (!model.backend) {
-        model.backend = ggml_backend_init_by_name("CPU", nullptr);
-        if (!model.backend) {
-            fprintf(stderr, "Failed to init CPU backend (check .so files are next to executable)\n");
-            return false;
-        }
-        if (n_threads <= 0) {
-            n_threads = std::max(1, (int)std::thread::hardware_concurrency() - 1);
-        }
-        // Set thread count via dynamic proc address (works with GGML_BACKEND_DL)
-        auto dev = ggml_backend_get_device(model.backend);
-        if (dev) {
-            auto reg = ggml_backend_dev_backend_reg(dev);
-            auto fn = (ggml_backend_set_n_threads_t)
-                ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
-            if (fn) fn(model.backend, n_threads);
-        }
-        if (verbose) printf("Using CPU backend (%d threads)\n", n_threads);
+        fprintf(stderr, "localvqe: failed to init %s device %d\n",
+                backend_name, device_index);
+        return fail();
     }
 
-    // Allocate weight tensors on the backend buffer (GPU if CUDA, CPU otherwise)
+    if (n_threads <= 0) {
+        n_threads = std::max(1, (int)std::thread::hardware_concurrency() - 1);
+    }
+    auto fn = (ggml_backend_set_n_threads_t)
+        ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
+    if (fn) fn(model.backend, n_threads);
+
+    if (verbose) {
+        const char* dn = ggml_backend_dev_name(dev);
+        const char* dd = ggml_backend_dev_description(dev);
+        fprintf(stderr, "localvqe: backend=%s device[%d]=%s (%s) threads=%d\n",
+                ggml_backend_name(model.backend), device_index,
+                dn ? dn : "?", dd ? dd : "?", n_threads);
+    }
+
     // Quantized tensors (Q4_K, Q8_0) are kept in their native format for inference.
     model.weight_buf = ggml_backend_alloc_ctx_tensors(model.weight_ctx, model.backend);
     if (!model.weight_buf) {
         fprintf(stderr, "Failed to allocate weight buffer\n");
-        gguf_free(gctx);
-        return false;
+        return fail();
     }
 
-    // Read tensor data from GGUF file into backend buffers
     FILE* f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "Failed to open: %s\n", path);
-        gguf_free(gctx);
-        return false;
+        return fail();
     }
     size_t data_offset = gguf_get_data_offset(gctx);
     for (int i = 0; i < n_tensors; i++) {
@@ -612,14 +655,11 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
         if (fread(buf.data(), 1, nbytes, f) != nbytes) {
             fprintf(stderr, "Short read for tensor: %s\n", name);
             fclose(f);
-            gguf_free(gctx);
-            return false;
+            return fail();
         }
         ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
     }
     fclose(f);
-
-    gguf_free(gctx);
     return true;
 }
 
