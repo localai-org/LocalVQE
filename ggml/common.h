@@ -38,18 +38,7 @@ inline void npy_save(const std::string& path, const NpyArray& arr) {
     npy_save(path, arr.data.data(), arr.shape);
 }
 
-// ── Audio I/O (requires libsndfile, used by tests only) ──────────────────────
-
-#ifdef LOCALVQE_HAS_SNDFILE
-/// Load an audio file (FLAC, WAV, etc.) as mono float32 [-1,1].
-/// Resamples to target_sr if the file's sample rate differs (simple decimation).
-/// Returns empty vector on failure.
-std::vector<float> audio_load_mono(const std::string& path,
-                                    int target_sr = 16000);
-/// Save mono float32 PCM as 16-bit WAV. Returns true on success.
-bool audio_save_wav(const std::string& path, const float* data, int64_t n,
-                    int sample_rate = 16000);
-#endif
+// Audio file I/O is in audio_io.h.
 
 // ── GGUF tensor loading ────────────────────────────────────────────────────
 

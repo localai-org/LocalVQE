@@ -8,6 +8,7 @@
 
 #include "localvqe_api.h"
 #include "common.h"
+#include "audio_io.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -53,14 +54,9 @@ int main(int argc, char** argv) {
     // Load PCM inputs
     std::vector<float> mic_pcm, ref_pcm;
     if (wav_mode) {
-#ifdef LOCALVQE_HAS_SNDFILE
         mic_pcm = audio_load_mono(mic_path);
         ref_pcm = audio_load_mono(ref_path);
         if (mic_pcm.empty() || ref_pcm.empty()) return 1;
-#else
-        fprintf(stderr, "Error: WAV I/O requires libsndfile (not found at build time)\n");
-        return 1;
-#endif
     } else {
         NpyArray mic = npy_load(mic_path);
         NpyArray ref = npy_load(ref_path);
@@ -100,16 +96,10 @@ int main(int argc, char** argv) {
     // Save output
     if (wav_mode || out_path.size() >= 4 &&
         out_path.compare(out_path.size() - 4, 4, ".wav") == 0) {
-#ifdef LOCALVQE_HAS_SNDFILE
         if (!audio_save_wav(out_path, enhanced.data(), n_mic)) {
             localvqe_free(ctx);
             return 1;
         }
-#else
-        fprintf(stderr, "Error: WAV I/O requires libsndfile (not found at build time)\n");
-        localvqe_free(ctx);
-        return 1;
-#endif
     } else {
         npy_save(out_path, enhanced.data(), {(int64_t)n_mic});
     }

@@ -5,6 +5,7 @@
 
 #include "localvqe_api.h"
 #include "common.h"
+#include "audio_io.h"
 
 #include "ggml.h"  // ggml_time_us
 
@@ -64,10 +65,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-#ifndef LOCALVQE_HAS_SNDFILE
-    fprintf(stderr, "Error: bench requires libsndfile\n");
-    return 1;
-#else
     std::vector<float> mic_pcm = audio_load_mono(mic_path);
     std::vector<float> ref_pcm = audio_load_mono(ref_path);
     if (mic_pcm.empty() || ref_pcm.empty()) return 1;
@@ -167,5 +164,4 @@ int main(int argc, char** argv) {
 
     localvqe_free(ctx);
     return 0;
-#endif
 }

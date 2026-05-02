@@ -8,6 +8,7 @@
 
 #include "localvqe_api.h"
 #include "common.h"
+#include "audio_io.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,7 +19,6 @@
 
 // ── Test 1: PCM end-to-end batch vs streaming ────────────────────────────
 
-#ifdef LOCALVQE_HAS_SNDFILE
 #include <dirent.h>
 
 // Collect all .flac files under a directory, recursively.
@@ -127,7 +127,6 @@ static bool run_one_pcm_pair(uintptr_t ctx, const std::string& mic_path,
            pass ? "OK" : "FAIL");
     return pass;
 }
-#endif // LOCALVQE_HAS_SNDFILE
 
 static bool test_pcm_e2e(const char* model_path,
                           const char* mic_dir, const char* ref_dir,
@@ -135,10 +134,6 @@ static bool test_pcm_e2e(const char* model_path,
     printf("=== Test 1: PCM end-to-end batch vs streaming (%d pairs) ===\n",
            n_pairs);
 
-#ifndef LOCALVQE_HAS_SNDFILE
-    printf("  SKIP (built without libsndfile)\n\n");
-    return true;
-#else
     // Collect files from both directories
     printf("  Scanning %s ...\n", mic_dir);
     std::vector<std::string> mic_files;
@@ -173,7 +168,6 @@ static bool test_pcm_e2e(const char* model_path,
     printf("  %s\n\n", all_pass ? "PASS" : "FAIL");
     localvqe_free(ctx);
     return all_pass;
-#endif
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────

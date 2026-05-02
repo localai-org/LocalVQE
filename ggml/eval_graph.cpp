@@ -10,6 +10,7 @@
 
 #include "localvqe_api.h"
 #include "common.h"
+#include "audio_io.h"
 #include <cstdio>
 #include <string>
 #include <vector>

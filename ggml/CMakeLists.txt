@@ -43,20 +43,22 @@ if(LOCALVQE_VULKAN)
 endif()
 add_subdirectory(vendor/ggml)
 
-# Optional: libsndfile for audio loading in tests
 find_package(PkgConfig)
 if(PkgConfig_FOUND)
     pkg_check_modules(SNDFILE sndfile)
 endif()
 
-# Common library (npy I/O, comparison utilities, audio metrics)
+# Common library (npy I/O, comparison utilities, GGUF tensor loading).
 add_library(dvqe_common STATIC common.cpp)
 target_include_directories(dvqe_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dvqe_common PUBLIC ggml)
+
+# Audio file I/O (libsndfile-backed). Linked by binaries that open files.
 if(SNDFILE_FOUND)
-    target_compile_definitions(dvqe_common PUBLIC LOCALVQE_HAS_SNDFILE)
-    target_include_directories(dvqe_common PUBLIC ${SNDFILE_INCLUDE_DIRS})
-    target_link_libraries(dvqe_common PUBLIC ${SNDFILE_LIBRARIES})
+    add_library(dvqe_audio_io STATIC audio_io.cpp)
+    target_include_directories(dvqe_audio_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+                                                    ${SNDFILE_INCLUDE_DIRS})
+    target_link_libraries(dvqe_audio_io PUBLIC ${SNDFILE_LIBRARIES})
 endif()
 
 # Hand-rolled model (streaming forward_frame only — kept for legacy tests)
@@ -67,9 +69,11 @@ target_link_libraries(dvqe_model PUBLIC dvqe_common)
 add_library(dvqe_graph STATIC localvqe_graph.cpp)
 target_link_libraries(dvqe_graph PUBLIC dvqe_common)
 
-# Main inference binary (CLI, uses C API → dvqe_graph)
-add_executable(localvqe localvqe.cpp localvqe_api.cpp)
-target_link_libraries(localvqe PRIVATE dvqe_graph)
+# Main inference binary (CLI). Needs WAV I/O.
+if(SNDFILE_FOUND)
+    add_executable(localvqe localvqe.cpp localvqe_api.cpp)
+    target_link_libraries(localvqe PRIVATE dvqe_graph dvqe_audio_io)
+endif()
 
 # Shared library with C API (for purego / dlopen)
 if(LOCALVQE_BUILD_SHARED)
@@ -105,10 +109,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_dct.cpp")
     target_link_libraries(test_dct PRIVATE dvqe_graph)
 endif()
 
-# Streaming/batch equivalence test (uses C API)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_streaming.cpp")
+# Streaming/batch equivalence test (uses C API + WAV I/O)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_streaming.cpp" AND SNDFILE_FOUND)
     add_executable(test_streaming test_streaming.cpp localvqe_api.cpp)
-    target_link_libraries(test_streaming PRIVATE dvqe_graph)
+    target_link_libraries(test_streaming PRIVATE dvqe_graph dvqe_audio_io)
 endif()
 
 # Noise-gate unit test (header-only utility, no model needed)
@@ -116,10 +120,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_noise_gate.cpp")
     add_executable(test_noise_gate test_noise_gate.cpp)
 endif()
 
-# Benchmark (uses C API for WAV path)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp")
+# Benchmark (uses C API + WAV I/O)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
     add_executable(bench bench.cpp localvqe_api.cpp)
-    target_link_libraries(bench PRIVATE dvqe_graph)
+    target_link_libraries(bench PRIVATE dvqe_graph dvqe_audio_io)
 
     # `bench-run` — build bench, fetch the released F32 model + a doubletalk
     # mic/ref WAV pair from HuggingFace, and run the benchmark. Intended for
@@ -197,8 +201,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/quantize.cpp")
     target_link_libraries(quantize PRIVATE ggml)
 endif()
 
-# GGML graph evaluation (uses C API)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/eval_graph.cpp")
+# GGML graph evaluation (uses C API + WAV I/O)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/eval_graph.cpp" AND SNDFILE_FOUND)
     add_executable(eval_graph eval_graph.cpp localvqe_api.cpp)
-    target_link_libraries(eval_graph PRIVATE dvqe_graph)
+    target_link_libraries(eval_graph PRIVATE dvqe_graph dvqe_audio_io)
 endif()
