@@ -183,7 +183,10 @@ with the `bench-run` cmake target — see [Benchmark](#benchmark) below.
 | Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       1 |  22 800 |  2.98 ms |  3.16 ms | 19.11 ms ‡ |   5.4×  |
 | Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       2 |  22 800 |  1.82 ms |  1.93 ms |  3.17 ms |     8.8×  |
 | Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       4 |  22 800 |  1.11 ms |  1.81 ms | 10.41 ms ‡ |  14.4×  |
-| Core i5-14500 (Alder Lake-S)   | CPU                         |      19 |   6 250 | 17.68 ms | 20.64 ms | 28.49 ms |     0.91× |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       1 |   6 250 |  3.25 ms |  3.53 ms |  6.73 ms |     4.93× |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       2 |   6 250 |  2.55 ms |  2.81 ms |  5.20 ms |     6.23× |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       3 |   6 250 |  2.26 ms |  3.09 ms |  3.85 ms |     7.06× |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       4 |   6 250 |  2.02 ms |  2.89 ms |  3.59 ms |     7.79× |
 | Core i5-14500 (Alder Lake-S)   | Vulkan — Arc A770 (dGPU)    |       — |   6 250 | 10.90 ms | 12.00 ms | 13.38 ms |     1.48× |
 | Core i5-14500 (Alder Lake-S)   | Vulkan — UHD 770 (iGPU)     |       — |   6 250 |  9.02 ms | 11.77 ms | 17.93 ms |     1.74× |
 
