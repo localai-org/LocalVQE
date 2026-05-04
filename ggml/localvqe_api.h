@@ -107,6 +107,11 @@ LOCALVQE_API void localvqe_free(localvqe_ctx_t ctx);
  * n_samples: Number of samples in both mic and ref (must be >= 512)
  * out:       Pre-allocated output buffer (n_samples floats)
  *
+ * Output is sample-aligned to input. The first hop is the
+ * synthesis-window-tapered start of the first analysis frame: it
+ * begins at zero and ramps up over `hop` samples, with no
+ * discontinuity at any frame boundary.
+ *
  * Returns 0 on success, negative on error.
  */
 LOCALVQE_API int localvqe_process_f32(localvqe_ctx_t ctx,
@@ -120,6 +125,11 @@ LOCALVQE_API int localvqe_process_f32(localvqe_ctx_t ctx,
  * ref:       Far-end reference (mono, int16 PCM, 16kHz)
  * n_samples: Number of samples in both mic and ref (must be >= 512)
  * out:       Pre-allocated output buffer (n_samples int16s)
+ *
+ * Output is sample-aligned to input. The first hop is the
+ * synthesis-window-tapered start of the first analysis frame: it
+ * begins at zero and ramps up over `hop` samples, with no
+ * discontinuity at any frame boundary.
  *
  * Returns 0 on success, negative on error.
  */
@@ -156,7 +166,7 @@ LOCALVQE_API int localvqe_fft_size(localvqe_ctx_t ctx);
  * hop_samples: Must equal hop_length (256)
  * out:         Pre-allocated output buffer (hop_samples floats)
  *
- * Returns 0 on success. First call outputs zeros (warmup).
+ * Returns 0 on success.
  */
 LOCALVQE_API int localvqe_process_frame_f32(localvqe_ctx_t ctx,
                                            const float* mic, const float* ref,
@@ -170,7 +180,7 @@ LOCALVQE_API int localvqe_process_frame_f32(localvqe_ctx_t ctx,
  * hop_samples: Must equal hop_length (256)
  * out:         Pre-allocated output buffer (hop_samples int16s)
  *
- * Returns 0 on success. First call outputs zeros (warmup).
+ * Returns 0 on success.
  */
 LOCALVQE_API int localvqe_process_frame_s16(localvqe_ctx_t ctx,
                                            const int16_t* mic, const int16_t* ref,

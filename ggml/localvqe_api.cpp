@@ -38,8 +38,6 @@ struct localvqe_ctx {
     // Synthesis OLA accumulator (512 floats, shifts by hop each frame).
     std::vector<float> ola;
 
-    int frame_count = 0;
-
     // Residual-echo noise gate. Off by default; user opts in via
     // localvqe_set_noise_gate. Operates per-hop on the post-OLA output.
     bool noise_gate_enabled = false;
@@ -97,7 +95,6 @@ static localvqe_ctx_t make_ctx(const char* model_path,
     ctx->ref_window.assign(n_fft, 0.0f);
     ctx->enh_window.assign(n_fft, 0.0f);
     ctx->ola.assign(n_fft, 0.0f);
-    ctx->frame_count = 0;
     ctx->s16_conv_buf.assign(3 * hop, 0.0f);
 
     return reinterpret_cast<localvqe_ctx_t>(ctx);
@@ -184,8 +181,15 @@ static void build_window(std::vector<float>& hist, const float* new_hop,
 }
 
 // Stream one hop through the graph, producing one hop of OLA'd output.
-// Returns hop samples to `out`. Frame 0 outputs zeros (matches the decoder's
-// front-pad trim in the reference PyTorch implementation).
+// Returns hop samples to `out`. The OLA accumulator is emitted on every
+// call including frame 0 — synthesis-window-tapered samples at the left
+// edge of the first frame's reconstruction start near zero and ramp up,
+// so callers can pre-pend silence (or simply concatenate) without a
+// click at the boundary. v1's DCT codec previously zeroed the first hop
+// and got away with it because its OLA divisor halved the next hop; the
+// COLA=1 sqrt-Hann² codec lands the next hop's first sample at full
+// synthesis-window peak, so emitting zeros for the first hop and
+// peak-amplitude content for the second creates an audible step.
 static void stream_one_frame(localvqe_ctx* ctx, const float* mic,
                              const float* ref, float* out) {
     auto& hp = ctx->graph_model.hparams;
@@ -204,25 +208,17 @@ static void stream_one_frame(localvqe_ctx* ctx, const float* mic,
     // STFT-256 is COLA=1 at hop=N/2, no divisor.
     for (int i = 0; i < n_fft; i++) ctx->ola[i] += ctx->enh_window[i];
 
-    if (ctx->frame_count == 0) {
-        // Drop the first hop — it only carries the encoder's zero-padded
-        // prefix. Mirrors `output[:, self.pad:]` in DCTDecoder.
-        std::memset(out, 0, hop * sizeof(float));
-    } else {
-        const float scale = (hp.version >= 2) ? 1.0f : 0.5f;
-        for (int i = 0; i < hop; i++) out[i] = ctx->ola[i] * scale;
-        if (ctx->noise_gate_enabled) {
-            localvqe::apply_noise_gate(out, hop,
-                                       ctx->noise_gate_threshold_dbfs);
-        }
+    const float scale = (hp.version >= 2) ? 1.0f : 0.5f;
+    for (int i = 0; i < hop; i++) out[i] = ctx->ola[i] * scale;
+    if (ctx->noise_gate_enabled) {
+        localvqe::apply_noise_gate(out, hop,
+                                   ctx->noise_gate_threshold_dbfs);
     }
 
     // Slide accumulator left by hop, zero-fill the tail.
     std::memmove(ctx->ola.data(), ctx->ola.data() + hop,
                  (n_fft - hop) * sizeof(float));
     std::memset(ctx->ola.data() + (n_fft - hop), 0, hop * sizeof(float));
-
-    ctx->frame_count++;
 }
 
 LOCALVQE_API int localvqe_process_f32(localvqe_ctx_t handle,
@@ -246,7 +242,6 @@ LOCALVQE_API int localvqe_process_f32(localvqe_ctx_t handle,
     std::fill(ctx->pcm_hist_mic.begin(), ctx->pcm_hist_mic.end(), 0.0f);
     std::fill(ctx->pcm_hist_ref.begin(), ctx->pcm_hist_ref.end(), 0.0f);
     std::fill(ctx->ola.begin(), ctx->ola.end(), 0.0f);
-    ctx->frame_count = 0;
 
     int n_frames = n_samples / hop;  // drop the trailing partial hop
     for (int t = 0; t < n_frames; t++) {
@@ -354,7 +349,6 @@ LOCALVQE_API void localvqe_reset(localvqe_ctx_t handle) {
     std::fill(ctx->pcm_hist_mic.begin(), ctx->pcm_hist_mic.end(), 0.0f);
     std::fill(ctx->pcm_hist_ref.begin(), ctx->pcm_hist_ref.end(), 0.0f);
     std::fill(ctx->ola.begin(), ctx->ola.end(), 0.0f);
-    ctx->frame_count = 0;
     // Note: gate config is intentionally NOT reset — it's caller-set
     // policy, not stream state.
 }
