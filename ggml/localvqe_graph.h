@@ -86,6 +86,18 @@ struct dvqe_stream_graph {
     std::vector<struct ggml_tensor*> conv_hist_in;
     std::vector<struct ggml_tensor*> conv_hist_out;
 
+    // Persistent pre-padded conv input windows (Fp, kh, C). The graph
+    // writes only the current frame into the last row (ggml_set_inplace);
+    // the host shifts rows up by one after each frame. Replaces the two
+    // whole-window concats + freq pad per conv.
+    std::vector<struct ggml_tensor*> conv_win;
+    // Windows live in their OWN persistent backend buffer (NOT gallocr
+    // inputs): the gallocr de-inplaces SET ops whose dst is an input tensor
+    // (input protection), which silently redirects the in-graph window write
+    // to a temp copy. Dedicated-buffer tensors write through (verified).
+    struct ggml_context* win_ctx = nullptr;
+    ggml_backend_buffer_t win_buf = nullptr;
+
     // S4D bottleneck hidden state (complex diagonal)
     struct ggml_tensor* s4d_h_real_in = nullptr;
     struct ggml_tensor* s4d_h_real_out = nullptr;
@@ -114,6 +126,11 @@ struct dvqe_stream_graph {
 
     // Persistent scratch for history copies (avoids per-frame heap allocation)
     std::vector<uint8_t> hist_scratch;
+
+    // Debug taps (tap_debug / parity verification): block-boundary tensors,
+    // ggml_set_output'd so the gallocr keeps their buffers after compute.
+    std::vector<struct ggml_tensor*> dbg_taps;
+    std::vector<std::string> dbg_names;
 };
 
 /// Build the streaming graph (T=1). Call once, then process_frame_graph() per frame.

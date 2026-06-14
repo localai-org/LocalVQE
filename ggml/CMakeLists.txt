@@ -147,6 +147,9 @@ set(_gguf_v1    ${_assets_dir}/localvqe-v1-1.3M-f32.gguf)
 set(_gguf_v11   ${_assets_dir}/localvqe-v1.1-1.3M-f32.gguf)
 set(_gguf_v12   ${_assets_dir}/localvqe-v1.2-1.3M-f32.gguf)
 set(_gguf_v13   ${_assets_dir}/localvqe-v1.3-4.8M-f32.gguf)
+set(_gguf_v14a  ${_assets_dir}/localvqe-v1.4-aec-200K-f32.gguf)
+set(_gguf_v14ab ${_assets_dir}/localvqe-v1.4-aec-200K-bf16.gguf)
+set(_gguf_v14fe ${_assets_dir}/localvqe-v1.4-aec-2.7K-f32.gguf)
 file(MAKE_DIRECTORY ${_assets_dir})
 
 function(_dvqe_download OUTFILE URL SHA COMMENT_TEXT)
@@ -176,6 +179,18 @@ _dvqe_download(${_gguf_v13}
     https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.3-4.8M-f32.gguf
     c4f7912485c32cfc206c536f2f050b52513f2f613fdbc616391f6b26ab1d51ec
     "Fetching LocalVQE v1.3 F32 model from HuggingFace")
+_dvqe_download(${_gguf_v14a}
+    https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.4-aec-200K-f32.gguf
+    b6e43138588a83bfe903ab5e143b4020b91c1e1629f5a575ac5855ff0003c731
+    "Fetching LocalVQE v1.4-AEC F32 model from HuggingFace")
+_dvqe_download(${_gguf_v14ab}
+    https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.4-aec-200K-bf16.gguf
+    c14899f4dec79e1bc3360ebb9845621bd32b81d7c9a6c1ee9e56fc1d7b1978a6
+    "Fetching LocalVQE v1.4-AEC BF16 model from HuggingFace")
+_dvqe_download(${_gguf_v14fe}
+    https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.4-aec-2.7K-f32.gguf
+    d79f824f6ee6f58b2a7108d1df90db51c42c15a7400a5addbd3be9972ba657a4
+    "Fetching LocalVQE v1.4-AEC 2.7K front-end-only model from HuggingFace")
 
 # Benchmark (uses C API + WAV I/O)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
@@ -255,32 +270,49 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_regression.cpp")
     target_link_libraries(test_regression PRIVATE dvqe_graph)
 
     add_custom_target(regression-assets
-        DEPENDS ${_gguf_v1} ${_gguf_v11} ${_gguf_v12} ${_gguf_v13})
+        DEPENDS ${_gguf_v1} ${_gguf_v11} ${_gguf_v12} ${_gguf_v13}
+                ${_gguf_v14a} ${_gguf_v14ab} ${_gguf_v14fe})
 
     set(_reg_fix    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
     set(_reg_input  ${_reg_fix}/regression_input.f32)
 
-    # Parallel lists: version tag (for the test name) and param-size suffix
-    # (for the filename). v1.3 broke the implicit "1.3M everywhere"
-    # assumption so each release now spells out its own size.
-    set(_reg_versions "v1"   "v1.1" "v1.2" "v1.3")
-    set(_reg_sizes    "1.3M" "1.3M" "1.3M" "4.8M")
-    list(LENGTH _reg_versions _reg_n)
-    math(EXPR _reg_last "${_reg_n} - 1")
-    foreach(_i RANGE ${_reg_last})
-        list(GET _reg_versions ${_i} _v)
-        list(GET _reg_sizes    ${_i} _sz)
-        set(_reg_gguf localvqe-${_v}-${_sz}-f32.gguf)
-        set(_reg_out  ${_reg_fix}/localvqe-${_v}-${_sz}-f32.out.f32)
-        add_test(NAME regression_${_v}_f32
+    # One entry per released GGUF, spelled as the full file stem — the
+    # fixture is <stem>.out.f32. (v1.3 broke the "1.3M everywhere" size
+    # assumption; v1.4-AEC adds a dtype variant, so the stem now carries
+    # everything.)
+    set(_reg_stems
+        "localvqe-v1-1.3M-f32"
+        "localvqe-v1.1-1.3M-f32"
+        "localvqe-v1.2-1.3M-f32"
+        "localvqe-v1.3-4.8M-f32"
+        "localvqe-v1.4-aec-200K-f32"
+        "localvqe-v1.4-aec-200K-bf16"
+        "localvqe-v1.4-aec-2.7K-f32")
+    foreach(_stem IN LISTS _reg_stems)
+        add_test(NAME regression_${_stem}
                  COMMAND test_regression
-                     --gguf-name ${_reg_gguf}
+                     --gguf-name ${_stem}.gguf
                      --input    ${_reg_input}
-                     --expected ${_reg_out})
-        set_tests_properties(regression_${_v}_f32 PROPERTIES
+                     --expected ${_reg_fix}/${_stem}.out.f32)
+        set_tests_properties(regression_${_stem} PROPERTIES
             SKIP_RETURN_CODE 77
             ENVIRONMENT "LOCALVQE_GGUF_DIR=${_assets_dir}")
     endforeach()
+
+    # Prime-coverage test. The standalone front-end's whole-signal delay
+    # priming only acts on inputs longer than the 1.024 s GCC window, so the
+    # 1 s fixtures above leave it a no-op. This uses a 3 s echo+delay fixture
+    # (regression_input_prime.f32 — far-end ref with a known 3000-sample echo)
+    # so daf_prime_delay locks the bulk delay and aligns the filter from
+    # frame 0; the committed output pins that path.
+    add_test(NAME regression_prime_localvqe-v1.4-aec-2.7K-f32
+             COMMAND test_regression
+                 --gguf-name localvqe-v1.4-aec-2.7K-f32.gguf
+                 --input    ${_reg_fix}/regression_input_prime.f32
+                 --expected ${_reg_fix}/localvqe-v1.4-aec-2.7K-f32.prime.out.f32)
+    set_tests_properties(regression_prime_localvqe-v1.4-aec-2.7K-f32 PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "LOCALVQE_GGUF_DIR=${_assets_dir}")
 endif()
 
 # Fuzz reproducer regression tests. Pin specific bugs found by the
@@ -329,4 +361,51 @@ if(LOCALVQE_FUZZ)
 
     add_executable(fuzz_audio fuzz/fuzz_audio.cpp localvqe_api.cpp)
     target_link_libraries(fuzz_audio PRIVATE dvqe_graph)
+
+    # fuzz_native — drives the hand-rolled DAF + native engine directly
+    add_executable(fuzz_native fuzz/fuzz_native.cpp native_engine.cpp)
+    target_link_libraries(fuzz_native PRIVATE dvqe_model dvqe_graph)
+endif()
+
+# Per-layer tap tool for PyTorch parity debugging (port verification)
+add_executable(tap_debug tap_debug.cpp)
+target_link_libraries(tap_debug PRIVATE dvqe_graph)
+
+# DAF front-end (stage 1 of the v1.4-AEC cascade) + standalone CLI.
+# The front-end is an adaptive filter — host-side float DSP whose
+# trajectory amplifies any codegen-level FP difference — so pin FP
+# contraction off to keep its output stable across optimization levels
+# and reproducible against the committed regression fixture.
+set_source_files_properties(daf_frontend.cpp PROPERTIES
+    COMPILE_OPTIONS "-ffp-contract=off")
+target_sources(dvqe_graph PRIVATE daf_frontend.cpp)
+add_executable(daf_cli daf_cli.cpp)
+target_link_libraries(daf_cli PRIVATE dvqe_graph)
+
+# Developer-only: native-ISA codegen for the hand-rolled DAF front-end
+# (the ggml libs keep their per-ISA runtime dispatch regardless). OFF by
+# default — it makes every binary linking dvqe_graph Zen4-only and does
+# not even compile on non-x86 hosts. Opt in for local benchmarking.
+option(LOCALVQE_DAF_NATIVE "Compile the dvqe_graph lib with -march=znver4 (developer benchmarking only)" OFF)
+if (LOCALVQE_DAF_NATIVE)
+    # NOTE: per-source COMPILE_OPTIONS silently failed (and Nix strips
+    # -march=native); target-level explicit arch.
+    target_compile_options(dvqe_graph PRIVATE -march=znver4 -funroll-loops)
+endif()
+
+# Developer-only: hand-rolled single-CPU streaming engine + harness. Same
+# caveat as above — Zen4-only binaries; OFF by default.
+option(LOCALVQE_NATIVE_ENGINE "Build the -march=znver4 native streaming engine (developer benchmarking only)" OFF)
+if (LOCALVQE_NATIVE_ENGINE)
+    add_executable(native_test native_test.cpp native_engine.cpp)
+    target_link_libraries(native_test PRIVATE dvqe_model dvqe_graph)
+    # NOTE: set_source_files_properties COMPILE_OPTIONS silently failed to
+    # apply here (zero ymm/zmm in the binary); use target-level options.
+    target_compile_options(native_test PRIVATE -march=znver4 -funroll-loops)
+
+    # Same harness with the AVX512BF16 conv kernels masked off, so the
+    # f32 (AVX512F 4-chain) kernel path keeps its own regression fixture.
+    add_executable(native_test_f32 native_test.cpp native_engine.cpp)
+    target_link_libraries(native_test_f32 PRIVATE dvqe_model dvqe_graph)
+    target_compile_options(native_test_f32 PRIVATE -march=znver4 -mno-avx512bf16 -funroll-loops)
 endif()

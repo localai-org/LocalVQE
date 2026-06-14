@@ -8,6 +8,7 @@
  */
 
 #include "localvqe_api.h"
+#include "daf_frontend.h"
 #include "localvqe_graph.h"
 #include "noise_gate.h"
 
@@ -22,9 +23,19 @@
 // ── Internal context ─────────────────────────────────────────────────────────
 
 struct localvqe_ctx {
+    // Optional DAF front-end (203K cascade): present when the gguf embeds
+    // daf.* tensors. Runs per hop before the mask graph; the graph then
+    // consumes (e, yhat) instead of (mic, ref).
+    daf_frontend daf;
+    std::vector<float> daf_e, daf_yhat;
+
     dvqe_graph_model graph_model;
     dvqe_stream_graph stream_graph;
     std::string last_error;
+
+    // Front-end-only build (2.7K release): mask graph never built; each
+    // hop emits the adaptive filter's output `e` directly.
+    bool daf_standalone = false;
 
     // 256-sample PCM history per channel (kept for next analysis window).
     std::vector<float> pcm_hist_mic;
@@ -85,7 +96,9 @@ static localvqe_ctx_t make_ctx(const char* model_path,
         delete ctx;
         return 0;
     }
-    if (!build_stream_graph(ctx->graph_model, ctx->stream_graph)) {
+    ctx->daf_standalone = ctx->graph_model.hparams.daf_standalone;
+    if (!ctx->daf_standalone &&
+        !build_stream_graph(ctx->graph_model, ctx->stream_graph)) {
         free_graph_model(ctx->graph_model);
         delete ctx;
         return 0;
@@ -94,6 +107,20 @@ static localvqe_ctx_t make_ctx(const char* model_path,
     int n_fft = ctx->graph_model.hparams.n_fft;
     int hop = ctx->graph_model.hparams.hop_length;
 
+    bool daf_ok = daf_init(ctx->daf, ctx->graph_model);
+    if (ctx->daf_standalone) {
+        if (!daf_ok) {  // a standalone build with no filter tensors is invalid
+            fprintf(stderr, "localvqe: daf.standalone set but no daf.* tensors\n");
+            free_graph_model(ctx->graph_model);
+            delete ctx;
+            return 0;
+        }
+        fprintf(stderr, "localvqe: front-end-only build (2.7K adaptive filter)\n");
+    } else if (daf_ok) {
+        fprintf(stderr, "localvqe: DAF front-end active (203K cascade)\n");
+    }
+    ctx->daf_e.assign(hop, 0.0f);
+    ctx->daf_yhat.assign(hop, 0.0f);
     ctx->pcm_hist_mic.assign(hop, 0.0f);
     ctx->pcm_hist_ref.assign(hop, 0.0f);
     ctx->mic_window.assign(n_fft, 0.0f);
@@ -210,6 +237,25 @@ static void stream_one_frame(localvqe_ctx* ctx, const float* mic,
     int n_fft = hp.n_fft;
     int hop   = hp.hop_length;
 
+    // Front-end-only build: emit the adaptive filter's output `e` directly,
+    // no mask graph / codec round-trip (and so no one-hop codec latency).
+    if (ctx->daf_standalone) {
+        daf_process(ctx->daf, mic, ref, hop,
+                    ctx->daf_e.data(), ctx->daf_yhat.data());
+        std::memcpy(out, ctx->daf_e.data(), hop * sizeof(float));
+        if (ctx->noise_gate_enabled) {
+            localvqe::apply_noise_gate(out, hop,
+                                       ctx->noise_gate_threshold_dbfs);
+        }
+        return;
+    }
+
+    if (ctx->daf.loaded) {
+        daf_process(ctx->daf, mic, ref, hop,
+                    ctx->daf_e.data(), ctx->daf_yhat.data());
+        mic = ctx->daf_e.data();
+        ref = ctx->daf_yhat.data();
+    }
     build_window(ctx->pcm_hist_mic, mic, hop, ctx->mic_window.data());
     build_window(ctx->pcm_hist_ref, ref, hop, ctx->ref_window.data());
 
@@ -252,7 +298,15 @@ LOCALVQE_API int localvqe_process_f32(localvqe_ctx_t handle,
         return -2;
     }
 
-    reset_stream_graph(ctx->stream_graph, ctx->graph_model);
+    if (!ctx->daf_standalone)
+        reset_stream_graph(ctx->stream_graph, ctx->graph_model);
+    if (ctx->daf.loaded) daf_reset(ctx->daf);
+    // Standalone front-end: the whole clip is available here (callers pass the
+    // full signal), so prime the bulk delay once and lock it — the filter is
+    // aligned from frame 0 instead of acquiring over the first ~1-3 s. The
+    // cascade keeps online acquisition (its mask hides the transient).
+    if (ctx->daf_standalone && ctx->daf.loaded)
+        daf_prime_delay(ctx->daf, mic, ref, n_samples);
     std::fill(ctx->pcm_hist_mic.begin(), ctx->pcm_hist_mic.end(), 0.0f);
     std::fill(ctx->pcm_hist_ref.begin(), ctx->pcm_hist_ref.end(), 0.0f);
     std::fill(ctx->ola.begin(), ctx->ola.end(), 0.0f);
@@ -359,7 +413,9 @@ LOCALVQE_API int localvqe_process_frame_s16(localvqe_ctx_t handle,
 LOCALVQE_API void localvqe_reset(localvqe_ctx_t handle) {
     if (!handle) return;
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
-    reset_stream_graph(ctx->stream_graph, ctx->graph_model);
+    if (!ctx->daf_standalone)
+        reset_stream_graph(ctx->stream_graph, ctx->graph_model);
+    if (ctx->daf.loaded) daf_reset(ctx->daf);
     std::fill(ctx->pcm_hist_mic.begin(), ctx->pcm_hist_mic.end(), 0.0f);
     std::fill(ctx->pcm_hist_ref.begin(), ctx->pcm_hist_ref.end(), 0.0f);
     std::fill(ctx->ola.begin(), ctx->ola.end(), 0.0f);

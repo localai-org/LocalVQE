@@ -29,6 +29,10 @@ struct localvqe_hparams {
     // 3 = pre-norm CausalGroupNorm + SiLU (v1.2 onward); identical structure
     //     to v=2, only the activation changes.
     int version          = 1;
+    // Front-end-only build (the 2.7K release): the GGUF carries daf.*
+    // tensors but no mask-backend weights. The engine skips the mask
+    // graph entirely and emits the adaptive filter's output `e`.
+    bool daf_standalone  = false;
     std::vector<int> mic_channels;
     std::vector<int> far_channels;
 };

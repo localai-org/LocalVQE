@@ -7,11 +7,18 @@
 acoustic echo cancellation (AEC), noise suppression, and dereverberation of
 16 kHz speech, designed to run on commodity CPUs in real time.
 
-- Two sizes — choose by CPU budget:
+- Two sizes of the joint model — choose by CPU budget:
   - **v1.3 (current)** — 4.8 M parameters (~19 MB F32), ~3.3 ms per 16 ms
     frame on Zen4 (4 threads), **≈4.7× realtime**.
   - **v1.2** — 1.3 M parameters (~5 MB F32), ~1.6 ms per 16 ms frame on
     Zen4 (4 threads), **≈9.7× realtime**.
+- **v1.4-AEC (new)** — echo cancellation *only*, 203 K parameters (~3 MB):
+  removes the speaker echo and leaves everything else — your voice, the
+  room, background sounds — untouched. See
+  [v1.4-AEC: echo cancellation only](#v14-aec-echo-cancellation-only).
+  A **2.7 K front-end-only** build (`-2.7K-f32.gguf`, ~0.36 ms/hop,
+  ≈44× realtime) ships the adaptive filter without the neural mask, for
+  the lightest possible linear echo canceller.
 - Causal, streaming: 256-sample hop, 16 ms algorithmic latency
 - F32 reference inference in C++ via [GGML](https://github.com/ggml-org/ggml);
   PyTorch reference included for verification and research
@@ -73,6 +80,41 @@ F32) for tight CPU budgets, and a 4.8 M-parameter wider build (v1.3,
 per-hop cost. Both are small enough to run real time on commodity
 CPUs.
 
+## v1.4-AEC: echo cancellation only
+
+v1.2 and v1.3 do three jobs at once — echo cancellation, noise
+suppression, and dereverberation. **LocalVQE-v1.4-AEC does exactly one:
+it removes the far-end echo and passes everything else through.** Your
+voice, the room's natural acoustics, and the background stay as they
+are. Choose it when:
+
+- another component owns noise suppression (an ASR front-end, a
+  conferencing stack with its own NS, a broadcast chain), and a second
+  suppressor would double-process the signal;
+- you *want* the ambience — full enhancement can sound "too processed"
+  for podcasts, field recordings, or rooms that are already quiet;
+- you need the smallest possible model: 203 K parameters, ~23× less
+  than v1.3.
+
+It is a two-stage cascade rather than a single network. A classical
+adaptive stage — cross-correlation pre-alignment plus a
+partitioned-block frequency-domain Kalman filter, steered per-frame by
+a small learned controller — cancels the linear part of the echo with
+unit gain on everything that isn't echo. A compact neural mask then
+removes the residual the linear filter can't reach (loudspeaker
+distortion, enclosure nonlinearity). Echo paths are searched over the
+same ~1 s window as v1.2/v1.3, and streaming latency is identical
+(16 ms hop).
+
+Two files are published: `f32` (the reference) and `bf16`, which
+stores the convolution weights in bfloat16 for a ~12 % smaller file.
+Output quality is identical within validation noise and inference
+speed is the same — pick `f32` unless download size matters.
+
+The AEC-only release is the first half of the v1.4 line; a joint
+variant that adds noise suppression on top of the same cascade is
+planned as the full v1.4.
+
 ## Model Weights
 
 Pre-trained weights are published on Hugging Face at
@@ -80,16 +122,21 @@ Pre-trained weights are published on Hugging Face at
 
 | File | Description |
 |---|---|
-| `localvqe-v1.3-4.8M-f32.gguf` | F32 GGUF — what the C++ engine loads (current default). |
+| `localvqe-v1.4-aec-200K-f32.gguf` | **New:** echo cancellation only — keeps voice, room, and background intact. |
+| `localvqe-v1.4-aec-200K-bf16.gguf` | Same model, conv weights in BF16 (~12 % smaller file, same quality). |
+| `localvqe-v1.4-aec-2.7K-f32.gguf` | **New:** the adaptive filter alone (2.7 K params, ~17 KB) — the cascade's front-end without the neural mask. Lighter and faster, less echo removal; same CLI/engine. |
+| `localvqe-v1.3-4.8M-f32.gguf` | F32 GGUF — joint AEC + NS + dereverb (current default). |
 | `localvqe-v1.3-4.8M.pt` | PyTorch checkpoint — for verification, ablation, and downstream research. |
-| `localvqe-v1.2-1.3M-f32.gguf` | Compact alternative — same architecture family, ~1/4 the cost per hop. |
+| `localvqe-v1.2-1.3M-f32.gguf` | Compact joint alternative — same architecture family, ~1/4 the cost per hop. |
 | `localvqe-v1.2-1.3M.pt` | PyTorch checkpoint for the compact variant. |
 | `localvqe-v1.1-1.3M-f32.gguf` | Older release. |
 | `localvqe-v1-1.3M-f32.gguf` | Original release. |
 
-The current release is **v1.3**. It widens the encoder/decoder
-(mic channels `[2,112,32,104,96,152]`, far `[2,64,32]`, bottleneck
-256) and trains from scratch under a noise-floor-aware loss recipe.
+**v1.3** is the current joint-model release (the echo-only
+**v1.4-AEC** is described in its own section above). It widens the
+encoder/decoder (mic channels `[2,112,32,104,96,152]`, far `[2,64,32]`,
+bottleneck 256) and trains from scratch under a noise-floor-aware loss
+recipe.
 On doubletalk it filters noise better than v1.2 (deg MOS +0.25 on
 the stratified dev sample, with stronger ERLE). On far-end-only
 echo it cancels harder but the residual rates rougher in AECMOS —
@@ -104,7 +151,27 @@ Per-hop, 16 kHz / 256-sample hop → 16 ms budget. Each hop is a full
 `bench-run` cmake target — see [Benchmark](#benchmark) below. 30
 iters × 625 hops/iter = 18 750 hops per row.
 
-### v1.3 (current — 4.8 M, wider encoder/decoder, bn 256)
+### v1.4-AEC (echo-only — 203 K two-stage cascade)
+
+| Hardware                              | Backend | Threads | Hop p50  | Hop p99  | RT factor |
+|---------------------------------------|---------|--------:|---------:|---------:|----------:|
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |       1 |  1.29 ms |  1.89 ms |    12.2× |
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |       2 |  1.04 ms |  1.55 ms |    15.1× |
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |       4 |  0.83 ms |  1.30 ms |    18.6× |
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |       8 |  1.13 ms |  1.45 ms |    14.1× |
+
+The adaptive front-end runs on the host CPU regardless of the selected
+GGML backend, and the neural stage is small enough that GPU offload
+isn't worth the transfer overhead — run this model on CPU. The BF16
+file benches identically at the 4-thread sweet spot (0.84 ms p50) and
+~7 % faster single-threaded.
+
+The **2.7 K front-end-only** build (`-2.7K-f32.gguf`) is just the
+adaptive filter — no neural mask — at **0.36 ms p50 / hop (≈44×
+realtime)** on the same Zen4 desktop. It is single-threaded by nature
+(sequential block DSP), so thread count doesn't change the figure.
+
+### v1.3 (current joint model — 4.8 M, wider encoder/decoder, bn 256)
 
 | Hardware                              | Backend | Threads | Hop p50  | Hop p99  | RT factor |
 |---------------------------------------|---------|--------:|---------:|---------:|----------:|
@@ -200,10 +267,11 @@ essentially thread-count-invariant — both 1 and 16 threads land on
 the same peak within a few hundred KiB — so one row per model
 suffices.
 
-| Model            | Post-load delta ¹ | Peak RSS (VmHWM) ² | Internal `total resident` ³ |
-|------------------|------------------:|-------------------:|----------------------------:|
-| **v1.3** (4.8 M) | +24.4 MiB         |  34.1 MiB          |  23.0 MiB                   |
-| **v1.2** (1.3 M) | +10.0 MiB         |  19.6 MiB          |   8.7 MiB                   |
+| Model                | Post-load delta ¹ | Peak RSS (VmHWM) ² | Internal `total resident` ³ |
+|----------------------|------------------:|-------------------:|----------------------------:|
+| **v1.3** (4.8 M)     | +24.4 MiB         |  34.1 MiB          |  23.0 MiB                   |
+| **v1.2** (1.3 M)     | +10.0 MiB         |  19.6 MiB          |   8.7 MiB                   |
+| **v1.4-AEC** (203 K) |  +6.7 MiB         |  17.0 MiB          |   3.1 MiB                   |
 
 ¹ RSS added by `localvqe_new_with_options` + CPU backend init, on
 top of the ~7 MiB binary/libs baseline measured by `bench` itself.
@@ -232,7 +300,102 @@ Full 800-clip eval on the
 [ICASSP 2022 AEC Challenge blind test set](https://github.com/microsoft/AEC-Challenge)
 (real recordings, not synthetic mixes):
 
-**v1.3** (current, 4.8 M):
+**v1.4-AEC** (echo cancellation only — background noise and room
+acoustics are kept *by design*):
+
+| Scenario                          |   n | AECMOS echo ↑ | AECMOS deg ↑ | blind ERLE ↑ | DNSMOS OVRL |
+|-----------------------------------|----:|--------------:|-------------:|-------------:|------------:|
+| doubletalk                        | 115 |          4.20 |         2.45 |            — |        2.59 |
+| doubletalk-with-movement          | 185 |          4.19 |         2.45 |            — |        2.55 |
+| farend-singletalk                 | 107 |          3.80 |         4.99 |      14.6 dB |        1.37 |
+| farend-singletalk-with-movement   | 193 |          3.86 |         4.95 |      11.1 dB |        1.31 |
+| nearend-singletalk                | 200 |          4.99 |         3.99 |            — |        3.08 |
+
+The unprocessed microphone scores echo MOS 2.67 / 2.56 / 1.90 / 2.13 /
+5.00 on the same five scenarios — v1.4-AEC buys **+1.5 to +1.9 echo
+MOS** over doing nothing, and its far-end echo scores match v1.3
+(3.80/3.86 vs 3.69/3.88) at 1/23 the parameters. Reading the other
+columns needs the keep-noise design in mind:
+
+- **Near-end preservation is the headline**: on nearend-singletalk the
+  output is nearly the input (deg 3.98 vs 4.07 unprocessed, DNSMOS
+  OVRL 3.08 vs 3.13) — where the joint models would denoise, this
+  model deliberately does nothing.
+- **Blind ERLE is bounded by the preserved background**: the output
+  keeps the room's noise, so energy can only drop to the ambient
+  floor — 14.6/11.1 dB here measures echo-above-ambient removed,
+  not total attenuation. v1.3's ~50 dB on the same clips reflects
+  that it deletes the background too; the numbers are not comparable.
+- **DNSMOS OVRL on far-end clips drops below even the unprocessed
+  mic** (1.37 vs 1.90): once the echo — the only speech-like content —
+  is removed, what remains is intentionally-kept ambient noise, which
+  DNSMOS rates as noise. Expected, not a defect.
+- **Doubletalk echo trails the joint models** (4.20 vs v1.3's 4.73):
+  suppressing the noise floor also removes echo cues buried in it —
+  headroom the keep-noise constraint gives up. Doubletalk deg (2.45)
+  sits between v1.2 (2.37) and v1.3 (2.62).
+
+The BF16 file scores identically — the largest difference across all
+five scenarios and four metrics is 0.1 dB ERLE and 0.01 MOS.
+
+**v1.4-AEC front-end-only** (2.7 K — the adaptive filter alone, no
+neural mask):
+
+| Scenario                          |   n | AECMOS echo ↑ | AECMOS deg ↑ | blind ERLE ↑ | DNSMOS OVRL |
+|-----------------------------------|----:|--------------:|-------------:|-------------:|------------:|
+| doubletalk                        | 115 |          4.00 |         2.79 |            — |        2.46 |
+| doubletalk-with-movement          | 185 |          3.90 |         2.92 |            — |        2.42 |
+| farend-singletalk                 | 107 |          4.06 |         5.00 |       6.5 dB |        1.24 |
+| farend-singletalk-with-movement   | 193 |          4.05 |         4.97 |       3.9 dB |        1.22 |
+| nearend-singletalk                | 200 |          4.98 |         3.77 |            — |        3.03 |
+
+Scored on the same 800-clip blind set and pipeline as the cascade above,
+so the columns line up directly. The standalone build estimates the bulk
+echo delay once over the whole clip and locks it, so the filter is
+aligned from the first frame (no online-acquisition transient — see
+[delay priming](#delay-priming-standalone-build) below). What the 2.7 K
+filter buys, and what the neural mask adds on top:
+
+- **Far-end echo MOS beats the full cascade** (4.06 / 4.05 vs the
+  cascade's 3.80 / 3.86) at 1/74 the parameters, and **+1.9 to +2.2 over
+  the unprocessed mic** (1.90 / 2.13). The aligned linear filter delivers
+  essentially all of the cascade's *perceptual* far-end echo gain — and
+  edges past it, because the standalone primes the delay while the
+  cascade relies on its mask to cover online acquisition.
+- **The mask's contribution is energy attenuation, not perceived
+  quality**: far-end ERLE is 6.5 / 3.9 dB here vs 14.6 / 11.1 dB for the
+  cascade. The filter removes the echo a listener notices; the mask
+  removes more of what's left over.
+- **Gentler on doubletalk near-end**: deg MOS stays *higher* than the
+  cascade (2.79 / 2.92 vs 2.45 / 2.45) — the filter trades some
+  doubletalk echo MOS (4.00 / 3.90 vs 4.20 / 4.19) for less near-end
+  distortion, even with the delay aligned.
+- **Near-end passthrough is unchanged** (4.98 / 3.77 / OVRL 3.03 vs the
+  cascade's 4.99 / 3.99 / 3.08) — with no echo present, both builds
+  correctly do almost nothing.
+
+The headline: the front-end-only build is for callers who want a
+near-zero-cost echo canceller that is perceptually competitive on
+far-end echo and maximally transparent on near-end speech, and who don't
+need the extra echo-energy attenuation the 200 K mask provides. Same CLI
+and engine; it just reads the `localvqe.daf.standalone` flag and emits
+the filter output directly.
+
+<a name="delay-priming-standalone-build"></a>
+**Delay priming (standalone build).** A classical adaptive filter must
+first find the bulk echo delay before it can cancel anything, and a
+robust GCC-PHAT estimate needs ~1 s of audio to lock — so a purely
+streaming filter leaks echo (heard as reverb) for the first 1–3 s. The
+cascade hides this behind its feed-forward mask; the bare filter cannot.
+So when the whole clip is available (file/batch use, including the demo),
+the standalone engine estimates the delay once over the entire signal and
+aligns the filter from frame 0. On the blind far-end set this cuts the
+time to reach 3 dB ERLE from ~3.3 s to ~0.9 s and lifts steady-state
+cancellation, with no change to the cascade (which still acquires online).
+Real-time callers that feed audio incrementally fall back to online
+acquisition automatically.
+
+**v1.3** (current joint model, 4.8 M):
 
 | Scenario                          |   n | AECMOS echo ↑ | AECMOS deg ↑ | blind ERLE ↑ | DNSMOS OVRL ↑ |
 |-----------------------------------|----:|--------------:|-------------:|-------------:|--------------:|
@@ -286,6 +449,12 @@ PyTorch checkpoint integrity (SHA256):
 
     22d3e2f33bb8b25ec1c6a928cfb741bb631d45bae2b3759684818b101c95878e  localvqe-v1.3-4.8M.pt
     ff6885e7c8d7d29a8ce963303dcd668ae0f2a7bdafae28631292fe6f06f7cd77  localvqe-v1.2-1.3M.pt
+
+(v1.4-AEC is GGUF-only — no PyTorch checkpoint is published for it.)
+
+GGUF integrity is enforced at load time — the C++ engine checks every
+model file against its built-in allowlist of released SHA256 digests
+(`ggml/model_hash.cpp`).
 
 ## Repository Layout
 
@@ -413,7 +582,7 @@ Produces `liblocalvqe.so` with the API in `ggml/localvqe_api.h`. See
 `ggml/tests/test_regression.cpp` is an end-to-end check: it runs
 `localvqe_process_f32` on a fixed seeded input through each published
 `.gguf` and compares against a committed reference output, mirroring
-the PyTorch suite under `pytorch/tests/`. Build, fetch both released
+the PyTorch suite under `pytorch/tests/`. Build, fetch the released
 GGUFs from HuggingFace, and run via CTest:
 
 ```bash
@@ -498,6 +667,12 @@ Without a reference, the AEC head sees silence and contributes nothing
 mic alone. With a reference, the plugin time-aligns it to the mic
 queue via OBS timestamps; the model's AlignBlock then absorbs the
 remaining speaker→mic acoustic delay (up to ~1 s on v1.2 and v1.3).
+
+The echo-only model works here too: browse to
+`localvqe-v1.4-aec-200K-f32.gguf` as the model and the filter cancels
+echo while leaving noise and room acoustics untouched (a reference
+source is required — without one this model passes audio through
+nearly unchanged).
 
 Tested on Linux. macOS uses the same POSIX `dladdr` path and is
 expected to work unchanged. The Windows path is implemented (via

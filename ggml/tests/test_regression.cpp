@@ -21,9 +21,12 @@
  * Exits 0 on PASS, 1 on FAIL, 77 on SKIP (CMake SKIP_RETURN_CODE).
  *
  * The .f32 fixtures are raw little-endian float32, no header.
- * Layout of <input.f32>: 16000 mic samples followed by 16000 ref
- * samples (32000 floats total). Layout of <expected.f32>: 16000
- * output samples. Regenerate via tests/regenerate_fixtures.py.
+ * Layout of <input.f32>: n mic samples followed by n ref samples
+ * (2n floats total); n is inferred from the file size. Layout of
+ * <expected.f32>: n output samples. The standard fixtures use n=16000
+ * (1 s); the prime-coverage fixture is longer than the 1.024 s GCC
+ * window so it exercises standalone delay priming. Regenerate via
+ * tests/regenerate_fixtures.py.
  */
 
 #include "localvqe_api.h"
@@ -39,7 +42,6 @@
 using localvqe_test::file_exists;
 using localvqe_test::resolve_gguf;
 static constexpr int SKIP_EXIT = localvqe_test::kSkipExit;
-static constexpr int N_SAMPLES = 16000;
 
 static bool read_f32(const std::string& path, std::vector<float>& out, size_t expected_count) {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -111,11 +113,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Load input: 16000 mic + 16000 ref.
+    // Input layout: n mic samples then n ref samples. n is derived from the
+    // file size so fixtures of any length work — the 1 s fixtures are n=16000;
+    // the prime-coverage fixture is longer than the 1.024 s GCC window, so it
+    // actually exercises standalone delay priming.
+    FILE* inf = std::fopen(input_path.c_str(), "rb");
+    if (!inf) { std::fprintf(stderr, "cannot open %s\n", input_path.c_str()); return 1; }
+    std::fseek(inf, 0, SEEK_END);
+    long in_bytes = std::ftell(inf);
+    std::fclose(inf);
+    if (in_bytes <= 0 || (in_bytes % (2 * (long)sizeof(float))) != 0) {
+        std::fprintf(stderr, "Bad input fixture size: %ld bytes\n", in_bytes);
+        return 1;
+    }
+    const int n_samples = (int)(in_bytes / sizeof(float) / 2);
+
     std::vector<float> input_buf;
-    if (!read_f32(input_path, input_buf, 2 * N_SAMPLES)) return 1;
+    if (!read_f32(input_path, input_buf, 2 * (size_t)n_samples)) return 1;
     const float* mic = input_buf.data();
-    const float* ref = input_buf.data() + N_SAMPLES;
+    const float* ref = input_buf.data() + n_samples;
 
     localvqe_ctx_t ctx = localvqe_new(resolved.c_str());
     if (!ctx) {
@@ -123,8 +139,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<float> out(N_SAMPLES, 0.0f);
-    int ret = localvqe_process_f32(ctx, mic, ref, N_SAMPLES, out.data());
+    std::vector<float> out(n_samples, 0.0f);
+    int ret = localvqe_process_f32(ctx, mic, ref, n_samples, out.data());
     if (ret != 0) {
         std::fprintf(stderr, "localvqe_process_f32 failed: %s\n", localvqe_last_error(ctx));
         localvqe_free(ctx);
@@ -137,29 +153,29 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Failed to write %s\n", save_path.c_str());
             return 1;
         }
-        std::printf("Saved %s (%d samples)\n", save_path.c_str(), N_SAMPLES);
+        std::printf("Saved %s (%d samples)\n", save_path.c_str(), n_samples);
         if (expected_path.empty()) return 0;
     }
 
     // Compare against reference.
     std::vector<float> expected;
-    if (!read_f32(expected_path, expected, N_SAMPLES)) return 1;
+    if (!read_f32(expected_path, expected, n_samples)) return 1;
 
     float max_abs = 0.0f, sum_abs = 0.0f;
     int n_violations = 0;
-    for (int i = 0; i < N_SAMPLES; i++) {
+    for (int i = 0; i < n_samples; i++) {
         float d = std::fabs(out[i] - expected[i]);
         float tol = atol + rtol * std::fabs(expected[i]);
         if (d > tol) n_violations++;
         if (d > max_abs) max_abs = d;
         sum_abs += d;
     }
-    float mean_abs = sum_abs / N_SAMPLES;
+    float mean_abs = sum_abs / n_samples;
 
     std::printf("max abs diff:  %.3e\n", max_abs);
     std::printf("mean abs diff: %.3e\n", mean_abs);
     std::printf("violations (>atol+rtol*|ref|): %d / %d (atol=%.1e, rtol=%.1e)\n",
-                n_violations, N_SAMPLES, atol, rtol);
+                n_violations, n_samples, atol, rtol);
     if (n_violations == 0) {
         std::printf("PASS\n");
         return 0;
