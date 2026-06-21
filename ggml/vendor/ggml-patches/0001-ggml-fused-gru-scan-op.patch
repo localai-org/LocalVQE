@@ -1,0 +1,267 @@
+From cb64b5c11ef7799f1057adfcae4afdda45e606ec Mon Sep 17 00:00:00 2001
+From: Richard Palethorpe <io@richiejp.com>
+Date: Sun, 21 Jun 2026 08:08:28 +0100
+Subject: [PATCH] ggml: fused GRU scan op (GGML_OP_GRU) for LocalVQE/GTCRN
+
+The GTCRN backend's two DPGRNN blocks each run a grouped GRU over the
+time axis. Expressed with stock ggml ops, one GRU step is ~13 tiny
+tensor ops; as graph nodes across all frames this dominated both graph
+build and compute time for the tiny ~49K model.
+
+Add a single fused op, ggml_gru(), that runs the whole recurrence in one
+CPU kernel. Inputs are the precomputed input projections (W_ih*x + b_ih),
+the hidden weight/bias, and the initial state; it scans forward or in
+reverse and returns the hidden sequence (== final hidden when L==1, the
+streaming case). Reverse mode serves the bidirectional DPGRNN backward
+pass.
+
+Touches: GGML_OP_GRU enum + ggml_gru() decl (include/ggml.h), op builder
+(src/ggml.c), CPU forward ggml_compute_forward_gru (src/ggml-cpu/ops.{h,cpp}),
+and op dispatch (src/ggml-cpu/ggml-cpu.c). CPU backend only; other backends
+fall back to the unfused graph.
+
+Carried as an in-tree patch over upstream ggml (see
+ggml/scripts/apply_ggml_patches.sh); the submodule stays pinned to its
+upstream commit.
+---
+ include/ggml.h          | 18 ++++++++++
+ src/ggml-cpu/ggml-cpu.c |  5 +++
+ src/ggml-cpu/ops.cpp    | 78 +++++++++++++++++++++++++++++++++++++++++
+ src/ggml-cpu/ops.h      |  1 +
+ src/ggml.c              | 42 ++++++++++++++++++++--
+ 5 files changed, 142 insertions(+), 2 deletions(-)
+
+diff --git a/include/ggml.h b/include/ggml.h
+index 669f66b6..3d329d18 100644
+--- a/include/ggml.h
++++ b/include/ggml.h
+@@ -575,6 +575,8 @@ extern "C" {
+ 
+         GGML_OP_GLU,
+ 
++        GGML_OP_GRU,  // fused GRU scan (LocalVQE) — whole recurrence in one op
++
+         GGML_OP_COUNT,
+     };
+ 
+@@ -2371,6 +2373,22 @@ extern "C" {
+             struct ggml_tensor  * C,
+             struct ggml_tensor  * ids);
+ 
++    // Fused GRU scan over a sequence (LocalVQE / GTCRN). Runs the whole recurrence
++    // in one op so the per-step gate (~13 tiny ops) is not paid as graph nodes.
++    //   gi : [3H, N, L]  precomputed input projections  W_ih*x + b_ih  (gate order r,z,n)
++    //   whh: [H, 3H]     hidden weight (ggml layout of PyTorch (3H,H))
++    //   bhh: [3H]        hidden bias
++    //   h0 : [H, N]      initial hidden state
++    //   reverse != 0     scan from L-1 down to 0 (writing outputs in forward order)
++    // result: [H, N, L]  hidden sequence (== final hidden when L==1)
++    GGML_API struct ggml_tensor * ggml_gru(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * gi,
++            struct ggml_tensor  * whh,
++            struct ggml_tensor  * bhh,
++            struct ggml_tensor  * h0,
++            int                   reverse);
++
+     // partition into non-overlapping windows with padding if needed
+     // example:
+     // a:   768   64   64    1
+diff --git a/src/ggml-cpu/ggml-cpu.c b/src/ggml-cpu/ggml-cpu.c
+index 8b323bd9..d1c4883b 100644
+--- a/src/ggml-cpu/ggml-cpu.c
++++ b/src/ggml-cpu/ggml-cpu.c
+@@ -1987,6 +1987,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_ssm_scan(params, tensor);
+             } break;
++        case GGML_OP_GRU:
++            {
++                ggml_compute_forward_gru(params, tensor);
++            } break;
+         case GGML_OP_WIN_PART:
+             {
+                 ggml_compute_forward_win_part(params, tensor);
+@@ -2353,6 +2357,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+         case GGML_OP_RWKV_WKV6:
+         case GGML_OP_GATED_LINEAR_ATTN:
+         case GGML_OP_RWKV_WKV7:
++        case GGML_OP_GRU:
+             {
+                 n_tasks = n_threads;
+             } break;
+diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
+index 3f85e531..c98cc9d2 100644
+--- a/src/ggml-cpu/ops.cpp
++++ b/src/ggml-cpu/ops.cpp
+@@ -9509,6 +9509,84 @@ void ggml_compute_forward_ssm_scan(
+     }
+ }
+ 
++// ggml_compute_forward_gru
++//
++// Fused GRU scan. One op runs the whole recurrence so the per-step gate is not
++// paid as graph nodes. PyTorch GRU semantics (gate order r,z,n;
++// n = tanh(gi_n + r * gh_n); h' = (1-z)*n + z*h). Input projections gi = W_ih*x +
++// b_ih are precomputed by the caller (a single batched mul_mat).
++//   src0 gi  [3H, N, L]   src1 whh [H, 3H]   src2 bhh [3H]   src3 h0 [H, N]
++//   dst      [H, N, L]    op_params[0] = reverse
++
++#define GGML_GRU_MAX_H 256
++
++static void ggml_compute_forward_gru_f32(
++        const ggml_compute_params * params,
++        ggml_tensor * dst) {
++    const ggml_tensor * gi  = dst->src[0];
++    const ggml_tensor * whh = dst->src[1];
++    const ggml_tensor * bhh = dst->src[2];
++    const ggml_tensor * h0  = dst->src[3];
++
++    const int64_t H  = whh->ne[0];
++    const int64_t TH = 3 * H;
++    const int64_t N  = gi->ne[1];
++    const int64_t L  = gi->ne[2];
++    const int     reverse = ((const int32_t *) dst->op_params)[0];
++    GGML_ASSERT(H <= GGML_GRU_MAX_H);
++
++    const float * gi_d  = (const float *) gi->data;
++    const float * whh_d = (const float *) whh->data;
++    const float * bhh_d = (const float *) bhh->data;
++    const float * h0_d  = (const float *) h0->data;
++    float       * dst_d = (float *) dst->data;
++
++    // split the N independent sequences across threads
++    const int64_t dn = (N + params->nth - 1) / params->nth;
++    const int64_t n0 = params->ith * dn;
++    const int64_t n1 = (n0 + dn < N) ? (n0 + dn) : N;
++
++    float h[GGML_GRU_MAX_H];
++    float gh[3 * GGML_GRU_MAX_H];
++    for (int64_t n = n0; n < n1; ++n) {
++        for (int64_t k = 0; k < H; ++k) h[k] = h0_d[k + n * H];
++        for (int64_t s = 0; s < L; ++s) {
++            const int64_t l = reverse ? (L - 1 - s) : s;
++            const float * gil = gi_d + (l * N + n) * TH;
++            for (int64_t g = 0; g < TH; ++g) {
++                const float * wr = whh_d + g * H;
++                float acc = bhh_d[g];
++                for (int64_t j = 0; j < H; ++j) acc += wr[j] * h[j];
++                gh[g] = acc;
++            }
++            float * out = dst_d + (l * N + n) * H;
++            for (int64_t k = 0; k < H; ++k) {
++                const float r = 1.0f / (1.0f + expf(-(gil[k]          + gh[k])));
++                const float z = 1.0f / (1.0f + expf(-(gil[H + k]      + gh[H + k])));
++                const float nc = tanhf(gil[2 * H + k] + r * gh[2 * H + k]);
++                const float hk = nc + z * (h[k] - nc);  // (1-z)*nc + z*h
++                h[k] = hk;
++                out[k] = hk;
++            }
++        }
++    }
++}
++
++void ggml_compute_forward_gru(
++        const ggml_compute_params * params,
++        ggml_tensor * dst) {
++    switch (dst->src[0]->type) {
++        case GGML_TYPE_F32:
++            {
++                ggml_compute_forward_gru_f32(params, dst);
++            } break;
++        default:
++            {
++                GGML_ABORT("fatal error");
++            }
++    }
++}
++
+ // ggml_compute_forward_win_part
+ 
+ static void ggml_compute_forward_win_part_f32(
+diff --git a/src/ggml-cpu/ops.h b/src/ggml-cpu/ops.h
+index 3fa1443a..4cfbdb62 100644
+--- a/src/ggml-cpu/ops.h
++++ b/src/ggml-cpu/ops.h
+@@ -92,6 +92,7 @@ void ggml_compute_forward_flash_attn_back(
+         struct ggml_tensor * dst);
+ void ggml_compute_forward_ssm_conv(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_ssm_scan(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_gru(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_win_part(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_win_unpart(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_unary(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+diff --git a/src/ggml.c b/src/ggml.c
+index 4c0764a0..5cccd413 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -1055,9 +1055,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "OPT_STEP_SGD",
+ 
+     "GLU",
++
++    "GRU",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
++static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+ 
+ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "none",
+@@ -1165,9 +1167,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "sgd(x)",
+ 
+     "glu(x)",
++
++    "gru(x)",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
++static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+ 
+ static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
+ 
+@@ -5533,6 +5537,40 @@ struct ggml_tensor * ggml_ssm_scan(
+     return result;
+ }
+ 
++// ggml_gru
++
++struct ggml_tensor * ggml_gru(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * gi,
++        struct ggml_tensor  * whh,
++        struct ggml_tensor  * bhh,
++        struct ggml_tensor  * h0,
++        int                   reverse) {
++    GGML_ASSERT(ggml_is_contiguous(gi));
++    GGML_ASSERT(ggml_is_contiguous(whh));
++    GGML_ASSERT(ggml_is_contiguous(bhh));
++    GGML_ASSERT(ggml_is_contiguous(h0));
++    const int64_t H  = whh->ne[0];
++    const int64_t N  = gi->ne[1];
++    const int64_t L  = gi->ne[2];
++    GGML_ASSERT(gi->ne[0] == 3 * H);
++    GGML_ASSERT(whh->ne[1] == 3 * H);
++    GGML_ASSERT(bhh->ne[0] == 3 * H);
++    GGML_ASSERT(h0->ne[0] == H && h0->ne[1] == N);
++
++    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, H, N, L);
++
++    ggml_set_op_params_i32(result, 0, reverse ? 1 : 0);
++
++    result->op     = GGML_OP_GRU;
++    result->src[0] = gi;
++    result->src[1] = whh;
++    result->src[2] = bhh;
++    result->src[3] = h0;
++
++    return result;
++}
++
+ // ggml_win_part
+ 
+ struct ggml_tensor * ggml_win_part(
+-- 
+2.51.2
+

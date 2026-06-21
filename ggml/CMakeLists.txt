@@ -28,8 +28,8 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 if(LOCALVQE_CUDA)
     set(GGML_CUDA ON CACHE BOOL "" FORCE)
     set(GGML_STATIC OFF CACHE BOOL "" FORCE)
-else()
-    # Build all CPU backend variants (SSE4.2 through AVX-512/Zen4) as shared
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    # x86: build all CPU backend variants (SSE4.2 through AVX-512/Zen4) as shared
     # libraries, selected at runtime based on CPU capabilities.
     # This avoids needing -march=native (which Nix strips).
     set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
@@ -41,6 +41,17 @@ else()
     # finds the CPU variant libraries next to the executable.
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "" FORCE)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "" FORCE)
+else()
+    # Non-x86 (e.g. aarch64 / Raspberry Pi 5 Cortex-A76): GGML_CPU_ALL_VARIANTS
+    # is x86-only and FATAL-errors here, so build a single self-contained binary
+    # targeting the requested -march. Pass -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
+    # for a Pi 5 (see docker/Dockerfile.arm64). No runtime backend DL — the CPU
+    # backend is statically registered, so ggml_backend_load_all() still finds it.
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+    set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "" FORCE)
+    set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+    set(GGML_STATIC ON CACHE BOOL "" FORCE)
 endif()
 if(LOCALVQE_VULKAN)
     # Composes with the CPU-DL path above: Vulkan becomes a separate
@@ -119,6 +130,16 @@ foreach(block fe encoder bottleneck decoder ccm align)
         target_link_libraries(test_${block} PRIVATE dvqe_common)
     endif()
 endforeach()
+
+# GTCRN-AEC backend (standalone arch; distinct from the LocalVQE graph).
+# Weights from train/export_gtcrn_ggml.py; parity-tested + benched via test_gtcrn.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gtcrn/gtcrn.cpp")
+    add_library(dvqe_gtcrn STATIC gtcrn/gtcrn.cpp gtcrn/gtcrn_ggml.cpp)
+    target_link_libraries(dvqe_gtcrn PUBLIC dvqe_common)
+    target_include_directories(dvqe_gtcrn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/gtcrn)
+    add_executable(test_gtcrn gtcrn/test_gtcrn.cpp)
+    target_link_libraries(test_gtcrn PRIVATE dvqe_gtcrn)
+endif()
 
 # DCT matmul layout test (validates ggml_mul_mat vs analytic DCT-II)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_dct.cpp")

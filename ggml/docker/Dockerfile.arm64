@@ -1,0 +1,42 @@
+# Cross-build the GTCRN-AEC parity/bench harness (test_gtcrn) for arm64
+# (aarch64) via docker buildx + qemu, so the binary drops straight onto a
+# Raspberry Pi 5 running Ubuntu 24.04. Build context is the ggml/ tree.
+#
+#   docker buildx build --platform linux/arm64 -f ggml/docker/Dockerfile.arm64 \
+#       --output type=local,dest=ggml/build-arm64 ggml
+#
+# The build runs under qemu user emulation (slow but reproducible). The base is
+# ubuntu:24.04 so the toolchain (gcc 13, glibc 2.39) and resulting ABI match a
+# Pi 5 on Ubuntu 24.04 -- the binary links glibc/libstdc++/libgomp dynamically
+# (all present on the Pi) and statically links ggml + the CPU backend.
+#
+# By default it targets the Pi 5's Cortex-A76 (armv8.2-a + dotprod + fp16).
+# Override --build-arg GGML_CPU_ARM_ARCH for a different chip, or set it to a
+# baseline like "armv8-a" for a portable (slower) binary.
+ARG UBUNTU=24.04
+
+FROM ubuntu:${UBUNTU} AS build
+ARG GGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
+ARG JOBS=4
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+# Copies the working tree, which must already have the in-tree ggml patches
+# applied (the fused GGML_OP_GRU op the GTCRN graph needs) — run
+# `bash ggml/scripts/apply_ggml_patches.sh` once after submodule init. The
+# copied vendor/ggml has no usable .git, so patches are applied host-side, not
+# here.
+COPY . .
+# On aarch64 the CMakeLists takes its non-x86 branch: a single static binary
+# (BUILD_SHARED_LIBS=OFF, GGML_BACKEND_DL/ALL_VARIANTS=OFF) at the requested
+# -march. GGML_CPU_ALL_VARIANTS is x86-only and would FATAL-error otherwise.
+RUN cmake -S . -B build/arm64 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_CPU_ARM_ARCH=${GGML_CPU_ARM_ARCH} \
+    && cmake --build build/arm64 -j${JOBS} --target test_gtcrn
+
+# Thin export stage: `--output type=local` against this target writes just the
+# binary to the host (no image layers, no apt cruft).
+FROM scratch AS export
+COPY --from=build /src/build/arm64/test_gtcrn /

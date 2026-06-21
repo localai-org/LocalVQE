@@ -46,3 +46,24 @@ references:
     collection-title: "Proc. Interspeech 2023"
     year: 2023
     doi: "10.21437/Interspeech.2023-2176"
+  - type: conference-paper
+    title: >-
+      GTCRN: A Speech Enhancement Model Requiring Ultralow Computational
+      Resources
+    authors:
+      - family-names: Rong
+        given-names: Xiaobin
+      - family-names: Sun
+        given-names: Tianchi
+      - family-names: Zhang
+        given-names: Xu
+      - family-names: Hu
+        given-names: Yuxiang
+      - family-names: Zhu
+        given-names: Changbao
+      - family-names: Lu
+        given-names: Jing
+    collection-title: "Proc. ICASSP 2024"
+    year: 2024
+    doi: "10.1109/ICASSP48485.2024.10448310"
+    notes: "Basis for the experimental Raspberry Pi (GTCRN-AEC) backend."

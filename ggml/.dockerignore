@@ -1,0 +1,12 @@
+# Keep the arm64 build context small: the source tree + vendored ggml are all
+# the Dockerfile needs. Local build trees are hundreds of MB and only slow the
+# qemu context upload.
+build/
+build-cpu/
+build-release/
+build-fuzz/
+build-arm64/
+.cache/
+**/*.o
+**/*.a
+vendor/ggml/.git

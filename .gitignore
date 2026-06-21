@@ -17,6 +17,9 @@ __pycache__/
 # weight-binary patterns above.
 !pytorch/tests/fixtures/*.pt
 !ggml/tests/fixtures/*.f32
+# GTCRN-AEC parity reference (small ~2.3 MB GGUF + .npy stage dumps) so
+# `test_gtcrn --fixtures` runs self-contained from a clean clone.
+!ggml/tests/gtcrn/*.gguf
 
 # Generated audio
 *.wav

@@ -39,6 +39,9 @@ factor (higher is faster than realtime).
   speakers play) in addition to the mic.
 - `bf16` GGUFs are ~12 % smaller with identical quality and speed; pick `f32`
   unless download size matters.
+- A separate **Raspberry Pi line** (experimental) — a ~49 K-parameter GTCRN-AEC
+  backend (a distinct architecture, not the v1.x graph) for single-board ARM;
+  ≈21× realtime on one Pi 5 core. See [below](#raspberry-pi-line--gtcrn-aec-experimental).
 
 ### Weight files on [Hugging Face](https://huggingface.co/LocalAI-io/LocalVQE)
 
@@ -49,6 +52,7 @@ factor (higher is faster than realtime).
 | `localvqe-v1.4-aec-200K-f32.gguf` / `-bf16.gguf` | v1.4-AEC (echo only) |
 | `localvqe-v1.4-aec-2.7K-f32.gguf` | v1.4-AEC front-end only |
 | `localvqe-v1.1-1.3M-f32.gguf`, `localvqe-v1-1.3M-f32.gguf` | older releases |
+| `localvqe-pi-v1-49k-f32.gguf`, `localvqe-pi-aec-v1-49k-f32.gguf` | Raspberry Pi GTCRN-AEC line — experimental (full enhance / echo-only) |
 
 v1.4-AEC is GGUF-only (no `.pt`). GGUF integrity is checked at load time against
 a built-in SHA256 allowlist (`ggml/model_hash.cpp`). PyTorch checkpoint hashes:
@@ -146,6 +150,27 @@ Working set the model adds on top of the ~7 MiB binary baseline:
 | v1.3 (4.8 M) | +24.4 MiB | 34.1 MiB |
 | v1.2 (1.3 M) | +10.0 MiB | 19.6 MiB |
 | v1.4-AEC (203 K) | +6.7 MiB | 17.0 MiB |
+
+### Raspberry Pi line — GTCRN-AEC (experimental)
+
+A separate, much smaller backend for single-board ARM: a ~49 K-parameter
+**GTCRN-AEC** network — a distinct architecture based on
+[GTCRN](https://github.com/Xiaobin-Rong/gtcrn) (Rong et al., ICASSP 2024) — with
+the project's DSP echo-cancellation front-end. Two variants share the
+architecture: a full enhancer (echo + NS + dereverb) and an echo-only
+"keep-noise" build. Cross-compile for aarch64 with `ggml/docker/Dockerfile.arm64`
+(docker buildx + qemu, Cortex-A76 target).
+
+Whole-clip RTF on the real ggml graph (`test_gtcrn --bench` on a Raspberry Pi 5
+Model B, Cortex-A76, Ubuntu 24.04), parity-verified to the PyTorch reference
+within ~1e-6 on-device (~0.78 ms per 16 ms hop single-threaded). RTF is identical
+for both variants:
+
+| Threads | 8 s clip | RTF | RT |
+|--:|--:|--:|--:|
+| 1 | 388 ms | 0.048 | ~21× |
+| 2 | 219 ms | 0.027 | ~37× |
+| 4 | 163 ms | 0.020 | ~49× |
 
 ## Usage
 
@@ -266,6 +291,23 @@ produces APA / BibTeX), and the upstream DeepVQE paper:
   doi       = {10.21437/Interspeech.2023-2176}
 }
 ```
+
+The experimental Raspberry Pi backend is based on **GTCRN** — please also cite:
+
+```bibtex
+@inproceedings{rong2024gtcrn,
+  title     = {GTCRN: A Speech Enhancement Model Requiring Ultralow
+               Computational Resources},
+  author    = {Rong, Xiaobin and Sun, Tianchi and Zhang, Xu and Hu, Yuxiang
+               and Zhu, Changbao and Lu, Jing},
+  booktitle = {ICASSP 2024 - 2024 IEEE International Conference on Acoustics,
+               Speech and Signal Processing (ICASSP)},
+  pages     = {971--975}, year = {2024},
+  doi       = {10.1109/ICASSP48485.2024.10448310}
+}
+```
+
+Reference implementation: <https://github.com/Xiaobin-Rong/gtcrn>.
 
 ## Attribution, safety, license
 
