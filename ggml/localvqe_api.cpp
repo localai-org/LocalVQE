@@ -753,7 +753,11 @@ LOCALVQE_API int localvqe_process_frame_s16(localvqe_ctx_t handle,
                                            int hop_samples, int16_t* out) {
     if (!handle) return -1;
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+    if (hop_samples <= 0) { ctx->last_error = "hop_samples must be > 0"; return -2; }
 
+    // The s16 scratch (3*hop) is sized here rather than at construction so it
+    // is valid for every model type — GTCRN contexts skip the v1.x buffer init.
+    ensure_size(ctx->s16_conv_buf, (size_t)3 * hop_samples);
     float* mic_f = ctx->s16_conv_buf.data();
     float* ref_f = mic_f + hop_samples;
     float* out_f = ref_f + hop_samples;
