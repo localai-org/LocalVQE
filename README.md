@@ -161,6 +161,13 @@ architecture: a full enhancer (echo + NS + dereverb) and an echo-only
 "keep-noise" build. Cross-compile for aarch64 with `ggml/docker/Dockerfile.arm64`
 (docker buildx + qemu, Cortex-A76 target).
 
+A graphical demo of the speed ([`demo/`](demo/)): a scrolling spectrogram whose
+processing frontier sweeps ahead of real-time playback, cleaning a 3-minute
+track in ~9 s on one Pi 5 core. The two bars track playback vs processing over
+the whole track.
+
+![Pi AEC sweep: a scrolling spectrogram whose processing frontier reveals the cleaned output ~21x faster than real-time playback on one Raspberry Pi 5 core](demo/out/sweep.gif)
+
 Whole-clip RTF on the real ggml graph (`test_gtcrn --bench` on a Raspberry Pi 5
 Model B, Cortex-A76, Ubuntu 24.04), parity-verified to the PyTorch reference
 within ~1e-6 on-device (~0.78 ms per 16 ms hop single-threaded). RTF is identical
