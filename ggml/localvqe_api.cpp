@@ -67,6 +67,12 @@ struct localvqe_ctx {
 #ifdef LOCALVQE_HAS_GTCRN
     GtcrnGraph* gt_graph = nullptr;
     GtcrnModel* gt_host  = nullptr;
+    // GTCRN streaming-frame state (built lazily on the first frame call).
+    GtcrnStream* gt_stream = nullptr;
+    std::vector<float> gt_bufE, gt_bufY;   // 512-sample STFT analysis buffers
+    std::vector<float> gt_acc, gt_wenv;    // 512-sample ISTFT overlap-add accumulators
+    float gt_pow = 0.0f;                   // running e-power (EMA) for the gain
+    bool gt_pow_init = false;
 #endif
 
     // Front-end-only build (2.7K release): mask graph never built; each
@@ -401,6 +407,7 @@ LOCALVQE_API void localvqe_free(localvqe_ctx_t handle) {
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
 #ifdef LOCALVQE_HAS_GTCRN
     if (ctx->is_gtcrn) {
+        delete ctx->gt_stream;
         delete ctx->gt_graph;
         delete ctx->gt_host;
         if (ctx->fe_model_loaded) free_graph_model(ctx->graph_model);
@@ -527,6 +534,95 @@ static int process_gtcrn_clip(localvqe_ctx* ctx, const float* mic,
     }
     return 0;
 }
+
+// Zero all GTCRN streaming state (new utterance / first frame).
+static void gtcrn_stream_reset(localvqe_ctx* ctx) {
+    if (ctx->daf.loaded) daf_reset(ctx->daf);
+    ctx->daf.enable_prealign = true;          // online GCC acquisition (no file-mode prime)
+    if (ctx->gt_stream) ctx->gt_stream->reset();
+    std::fill(ctx->gt_bufE.begin(), ctx->gt_bufE.end(), 0.0f);
+    std::fill(ctx->gt_bufY.begin(), ctx->gt_bufY.end(), 0.0f);
+    std::fill(ctx->gt_acc.begin(), ctx->gt_acc.end(), 0.0f);
+    std::fill(ctx->gt_wenv.begin(), ctx->gt_wenv.end(), 0.0f);
+    ctx->gt_pow = 0.0f; ctx->gt_pow_init = false;
+}
+
+// One streaming hop (256 samples) for a GTCRN model: DAF front-end (online) ->
+// running RMS-normalise -> 512-sample STFT frame -> GtcrnStream::step (carried
+// recurrent state) -> inverse frame, undo gain, overlap-add -> 256 samples out.
+// Real-time / low-latency counterpart of process_gtcrn_clip; not bit-identical
+// to it (online DAF acquisition + running gain vs whole-clip).
+static int process_gtcrn_frame(localvqe_ctx* ctx, const float* mic,
+                               const float* ref, float* out) {
+    const int H = 256, N = 512;
+    if (!ctx->gt_stream) {
+        ctx->gt_stream = new (std::nothrow) GtcrnStream();
+        if (!ctx->gt_stream || !ctx->gt_stream->begin(*ctx->gt_graph)) {
+            ctx->last_error = "GTCRN streaming session init failed";
+            delete ctx->gt_stream; ctx->gt_stream = nullptr; return -1;
+        }
+        ctx->gt_bufE.assign(N, 0.0f); ctx->gt_bufY.assign(N, 0.0f);
+        ctx->gt_acc.assign(N, 0.0f);  ctx->gt_wenv.assign(N, 0.0f);
+        gtcrn_stream_reset(ctx);
+    }
+
+    // 1. DAF front-end, one hop (online acquisition — no file-mode prime).
+    ensure_size(ctx->daf_e, H); ensure_size(ctx->daf_yhat, H);
+    daf_process(ctx->daf, mic, ref, H, ctx->daf_e.data(), ctx->daf_yhat.data());
+    float* e = ctx->daf_e.data(); float* yh = ctx->daf_yhat.data();
+
+    // 2. running RMS gain (EMA) toward the training level (0.05 RMS).
+    double p = 0.0;
+    for (int i = 0; i < H; ++i) p += (double)e[i] * e[i];
+    p /= H;
+    const float A = 0.95f;
+    ctx->gt_pow = ctx->gt_pow_init ? (A * ctx->gt_pow + (1.0f - A) * (float)p) : (float)p;
+    ctx->gt_pow_init = true;
+    float gain = 0.05f / ((float)std::sqrt(ctx->gt_pow) + 1e-6f);
+    gain = std::min(50.0f, std::max(0.05f, gain));
+
+    // 3. slide the 512-sample analysis buffers, append this hop RAW. The gain is
+    //    applied uniformly to the whole window below, so a frame is never split
+    //    across two different per-hop gains (which would corrupt the spectrum).
+    float* bE = ctx->gt_bufE.data(); float* bY = ctx->gt_bufY.data();
+    std::memmove(bE, bE + H, (size_t)H * sizeof(float));
+    std::memmove(bY, bY + H, (size_t)H * sizeof(float));
+    for (int i = 0; i < H; ++i) { bE[H + i] = e[i]; bY[H + i] = yh[i]; }
+
+    // 4. uniform gain over the full window, then one STFT frame each.
+    float winE[512], winY[512];
+    for (int n = 0; n < N; ++n) { winE[n] = bE[n] * gain; winY[n] = bY[n] * gain; }
+    float re_e[257], im_e[257], re_y[257], im_y[257], spe[514], spy[514], osp[514];
+    ctx->gt_host->stft_frame(winE, re_e, im_e);
+    ctx->gt_host->stft_frame(winY, re_y, im_y);
+    for (int f = 0; f < 257; ++f) {
+        spe[f * 2] = re_e[f]; spe[f * 2 + 1] = im_e[f];
+        spy[f * 2] = re_y[f]; spy[f * 2 + 1] = im_y[f];
+    }
+
+    // 5. GTCRN net step (recurrent state carried across calls).
+    ctx->gt_stream->step(spe, spy, osp);
+
+    // 6. inverse frame, undo the gain so the OLA mixes original-scale frames.
+    float ore[257], oim[257], ft[512];
+    for (int f = 0; f < 257; ++f) { ore[f] = osp[f * 2]; oim[f] = osp[f * 2 + 1]; }
+    ctx->gt_host->istft_frame(ore, oim, ft);
+    float inv = 1.0f / gain;
+    for (int n = 0; n < N; ++n) ft[n] *= inv;
+
+    // 7. overlap-add (50%), emit the now-complete hop, slide the accumulators.
+    const std::vector<float>& w2 = ctx->gt_host->win2();
+    float* acc = ctx->gt_acc.data(); float* we = ctx->gt_wenv.data();
+    for (int n = 0; n < N; ++n) { acc[n] += ft[n]; we[n] += w2[n]; }
+    for (int i = 0; i < H; ++i) out[i] = (we[i] > 1e-11f) ? acc[i] / we[i] : 0.0f;
+    std::memmove(acc, acc + H, (size_t)H * sizeof(float)); std::memset(acc + H, 0, (size_t)H * sizeof(float));
+    std::memmove(we, we + H, (size_t)H * sizeof(float));   std::memset(we + H, 0, (size_t)H * sizeof(float));
+
+    // 8. optional residual-echo gate.
+    if (ctx->noise_gate_enabled)
+        localvqe::apply_noise_gate(out, H, ctx->noise_gate_threshold_dbfs);
+    return 0;
+}
 #endif  // LOCALVQE_HAS_GTCRN
 
 LOCALVQE_API int localvqe_process_f32(localvqe_ctx_t handle,
@@ -640,9 +736,11 @@ LOCALVQE_API int localvqe_process_frame_f32(localvqe_ctx_t handle,
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
 #ifdef LOCALVQE_HAS_GTCRN
     if (ctx->is_gtcrn) {
-        ctx->last_error = "GTCRN models are whole-clip; call localvqe_process_f32, "
-                          "not the per-hop frame API";
-        return -3;
+        if (hop_samples != 256) {
+            ctx->last_error = "GTCRN streaming hop must be 256 samples";
+            return -2;
+        }
+        return process_gtcrn_frame(ctx, mic, ref, out);
     }
 #endif
     if (hop_samples != ctx->graph_model.hparams.hop_length) return -2;
@@ -674,7 +772,7 @@ LOCALVQE_API void localvqe_reset(localvqe_ctx_t handle) {
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
 #ifdef LOCALVQE_HAS_GTCRN
     if (ctx->is_gtcrn) {
-        if (ctx->daf.loaded) daf_reset(ctx->daf);  // re-primed per clip anyway
+        gtcrn_stream_reset(ctx);  // streaming state; the whole-clip path re-primes per call
         return;
     }
 #endif

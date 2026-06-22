@@ -517,3 +517,28 @@ std::vector<float> GtcrnModel::istft(const float* spec, int T, int L) const {
     }
     return y;
 }
+
+void GtcrnModel::stft_frame(const float* fr, float* re, float* im) const {
+    const int N = 512, Fb = 257;
+    const NpyArray& wcos = W.at("stft.wcos");  // (257,512), analysis window baked in
+    const NpyArray& wsin = W.at("stft.wsin");
+    for (int f = 0; f < Fb; ++f) {
+        const float* wc = &wcos.data[(size_t)f * N];
+        const float* ws = &wsin.data[(size_t)f * N];
+        float r = 0, ii = 0;
+        for (int n = 0; n < N; ++n) { r += wc[n] * fr[n]; ii += ws[n] * fr[n]; }
+        re[f] = r; im[f] = ii;
+    }
+}
+
+void GtcrnModel::istft_frame(const float* re, const float* im, float* ft) const {
+    const int N = 512, Fb = 257;
+    const NpyArray& icos = W.at("stft.icos");  // (512,257), synthesis window baked in
+    const NpyArray& isin = W.at("stft.isin");
+    for (int n = 0; n < N; ++n) {
+        float v = 0;
+        for (int f = 0; f < Fb; ++f)
+            v += icos.data[(size_t)n * Fb + f] * re[f] + isin.data[(size_t)n * Fb + f] * im[f];
+        ft[n] = v;
+    }
+}

@@ -52,6 +52,15 @@ struct GtcrnModel {
     int n_frames(int L) const { return 1 + L / 256; }
     std::vector<float> stft(const float* sig, int L) const;          // -> (257, n_frames, 2)
     std::vector<float> istft(const float* spec, int T, int L) const; // -> (L,)
+
+    /// Single-frame primitives for streaming OLA (no padding, no envelope
+    /// normalization — the caller owns the 512-sample analysis buffer and the
+    /// overlap-add). stft_frame: 512 windowed samples -> 257 (re,im).
+    /// istft_frame: 257 (re,im) -> 512 samples (pre-OLA). win2() is the
+    /// synthesis window energy (512) for the OLA divisor.
+    void stft_frame(const float* fr512, float* re257, float* im257) const;
+    void istft_frame(const float* re257, const float* im257, float* ft512) const;
+    const std::vector<float>& win2() const { return W.at("stft.win2").data; }
 };
 
 // Forward decls (avoid pulling ggml headers into this header).
@@ -61,6 +70,9 @@ struct ggml_backend;
 typedef struct ggml_backend* ggml_backend_t;
 struct ggml_backend_buffer;
 typedef struct ggml_backend_buffer* ggml_backend_buffer_t;
+struct ggml_cgraph;
+struct ggml_gallocr;
+typedef struct ggml_gallocr* ggml_gallocr_t;
 
 /// Real GGML inference: the whole GTCRN-AEC forward built as a ggml_cgraph of
 /// ggml ops and dispatched through a backend (CPU SIMD variants by default).
@@ -90,4 +102,27 @@ struct GtcrnGraph {
     std::vector<float> forward_stream(const float* spec_e, const float* spec_y, int T,
                                       std::map<std::string, NpyArray>* cap = nullptr,
                                       double* compute_ms = nullptr) const;
+};
+
+/// Persistent streaming session: builds the T=1 graph + allocator ONCE, then
+/// step() runs one frame, carrying recurrent state across calls (the real-time
+/// per-hop path, e.g. the C API frame interface). Mirrors the graph in
+/// GtcrnGraph::forward_stream — keep the two in sync. Not thread-safe; one
+/// session per stream.
+struct GtcrnStream {
+    ggml_backend_t backend = nullptr;
+    ggml_context* sctx = nullptr;
+    ggml_cgraph* graph = nullptr;
+    ggml_gallocr_t ga = nullptr;
+    ggml_tensor *re_e = nullptr, *im_e = nullptr, *re_y = nullptr, *im_y = nullptr;
+    ggml_tensor *zeros = nullptr, *out = nullptr;
+    std::vector<std::pair<ggml_tensor*, ggml_tensor*>> states;  // (in, out) per recurrence
+    std::vector<std::vector<float>> sbuf;                       // carried host state
+    std::vector<float> zbuf;
+
+    bool begin(const GtcrnGraph& g);   // build + allocate + zero state
+    void reset();                      // zero carried state (new utterance)
+    /// One frame. spec_e/spec_y: 257*2 interleaved (re,im); out_spec: 257*2.
+    void step(const float* spec_e, const float* spec_y, float* out_spec);
+    ~GtcrnStream();
 };

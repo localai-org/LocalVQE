@@ -609,3 +609,97 @@ std::vector<float> GtcrnGraph::forward_stream(const float* spec_e, const float* 
     ggml_free(ctx);
     return result;
 }
+
+// ── persistent streaming session ─────────────────────────────────────────────
+// Mirrors forward_stream's T=1 graph, but built ONCE and stepped per call so
+// recurrent state persists across separate frame calls (the C API frame path).
+// Keep the graph here in sync with forward_stream.
+bool GtcrnStream::begin(const GtcrnGraph& g) {
+    backend = g.backend;
+    const int n_op = 60000;
+    struct ggml_init_params cp;
+    cp.mem_size = (size_t)n_op * (ggml_tensor_overhead() + 32) + ggml_graph_overhead_custom(n_op, false);
+    cp.mem_buffer = nullptr;
+    cp.no_alloc = true;
+    sctx = ggml_init(cp);
+
+    GB gb{sctx, &g.wt, nullptr};
+    gb.st = &states;
+
+    re_e = ggml_new_tensor_3d(sctx, GGML_TYPE_F32, 257, 1, 1);
+    im_e = ggml_new_tensor_3d(sctx, GGML_TYPE_F32, 257, 1, 1);
+    re_y = ggml_new_tensor_3d(sctx, GGML_TYPE_F32, 257, 1, 1);
+    im_y = ggml_new_tensor_3d(sctx, GGML_TYPE_F32, 257, 1, 1);
+    zeros = ggml_new_tensor_1d(sctx, GGML_TYPE_F32, 16 * 33);
+    for (ggml_tensor* t : {re_e, im_e, re_y, im_y, zeros}) ggml_set_input(t);
+    gb.zeros = zeros;
+
+    ggml_tensor* ft = ggml_concat(sctx, gb.feat(re_e, im_e), gb.feat(re_y, im_y), 2);
+    ggml_tensor* en0 = gb.conv_block(ft, "encoder.en_convs.0", 1, 2, false, false);
+    ggml_tensor* en1 = gb.conv_block(en0, "encoder.en_convs.1", 2, 2, false, false);
+    ggml_tensor* en2 = gb.gt_block_stream(en1, "encoder.en_convs.2", 1);
+    ggml_tensor* en3 = gb.gt_block_stream(en2, "encoder.en_convs.3", 2);
+    ggml_tensor* en4 = gb.gt_block_stream(en3, "encoder.en_convs.4", 5);
+    ggml_tensor* d1 = gb.dpgrnn_stream(en4, "dpgrnn1");
+    ggml_tensor* d2 = gb.dpgrnn_stream(d1, "dpgrnn2");
+    ggml_tensor* x = gb.gt_block_stream(ggml_add(sctx, d2, en4), "decoder.de_convs.0", 5);
+    x = gb.gt_block_stream(ggml_add(sctx, x, en3), "decoder.de_convs.1", 2);
+    x = gb.gt_block_stream(ggml_add(sctx, x, en2), "decoder.de_convs.2", 1);
+    x = gb.conv_block(ggml_add(sctx, x, en1), "decoder.de_convs.3", 2, 2, true, false);
+    x = gb.conv_block(ggml_add(sctx, x, en0), "decoder.de_convs.4", 1, 2, true, true);
+    ggml_tensor* mask = gb.band(x, gb.W("erb.bs"), 65);
+    ggml_tensor* mr = gb.cont(ggml_view_4d(sctx, mask, 257, 1, 1, 1, mask->nb[1], mask->nb[2], mask->nb[3], 0));
+    ggml_tensor* mi = gb.cont(ggml_view_4d(sctx, mask, 257, 1, 1, 1, mask->nb[1], mask->nb[2], mask->nb[3], (size_t)1 * mask->nb[2]));
+    ggml_tensor* outr = ggml_sub(sctx, ggml_mul(sctx, re_e, mr), ggml_mul(sctx, im_e, mi));
+    ggml_tensor* outi = ggml_add(sctx, ggml_mul(sctx, im_e, mr), ggml_mul(sctx, re_e, mi));
+    out = ggml_concat(sctx, gb.perm(outr, 2, 1, 0, 3), gb.perm(outi, 2, 1, 0, 3), 0);  // [2,1,257]
+    ggml_set_output(out);
+    for (auto& s : states) ggml_set_output(s.second);
+
+    graph = ggml_new_graph_custom(sctx, n_op, false);
+    ggml_build_forward_expand(graph, out);
+    for (auto& s : states) ggml_build_forward_expand(graph, s.second);
+
+    ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    if (!ggml_gallocr_alloc_graph(ga, graph)) {
+        fprintf(stderr, "gtcrn(stream): gallocr alloc failed\n");
+        ggml_gallocr_free(ga); ga = nullptr; ggml_free(sctx); sctx = nullptr; return false;
+    }
+
+    sbuf.assign(states.size(), {});
+    for (size_t i = 0; i < states.size(); ++i)
+        sbuf[i].assign(ggml_nelements(states[i].second), 0.0f);
+    zbuf.assign(16 * 33, 0.0f);
+    return true;
+}
+
+void GtcrnStream::reset() {
+    for (auto& s : sbuf) s.assign(s.size(), 0.0f);
+}
+
+void GtcrnStream::step(const float* spec_e, const float* spec_y, float* out_spec) {
+    float rf[257], imf[257], ryf[257], iyf[257], of[2 * 257];
+    for (int f = 0; f < 257; ++f) {
+        rf[f] = spec_e[f * 2]; imf[f] = spec_e[f * 2 + 1];
+        ryf[f] = spec_y[f * 2]; iyf[f] = spec_y[f * 2 + 1];
+    }
+    ggml_backend_tensor_set(re_e, rf, 0, 257 * sizeof(float));
+    ggml_backend_tensor_set(im_e, imf, 0, 257 * sizeof(float));
+    ggml_backend_tensor_set(re_y, ryf, 0, 257 * sizeof(float));
+    ggml_backend_tensor_set(im_y, iyf, 0, 257 * sizeof(float));
+    ggml_backend_tensor_set(zeros, zbuf.data(), 0, zbuf.size() * sizeof(float));
+    for (size_t i = 0; i < states.size(); ++i)
+        ggml_backend_tensor_set(states[i].first, sbuf[i].data(), 0, sbuf[i].size() * sizeof(float));
+
+    ggml_backend_graph_compute(backend, graph);
+
+    for (size_t i = 0; i < states.size(); ++i)
+        ggml_backend_tensor_get(states[i].second, sbuf[i].data(), 0, sbuf[i].size() * sizeof(float));
+    ggml_backend_tensor_get(out, of, 0, 2 * 257 * sizeof(float));  // [2,1,257]: ri + f*2
+    for (int f = 0; f < 257; ++f) { out_spec[f * 2] = of[f * 2]; out_spec[f * 2 + 1] = of[f * 2 + 1]; }
+}
+
+GtcrnStream::~GtcrnStream() {
+    if (ga) ggml_gallocr_free(ga);
+    if (sctx) ggml_free(sctx);
+}

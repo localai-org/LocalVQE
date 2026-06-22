@@ -228,9 +228,10 @@ localvqe_process_f32(ctx, mic, ref, n_samples, out);   // whole clip
 // or per 256-sample hop for real-time: localvqe_process_frame_f32(...)
 localvqe_free(ctx);
 
-// Compact / low-power line (GTCRN): same call, whole-clip only.
+// Compact / low-power line (GTCRN): same calls — whole-clip or per-hop streaming.
 localvqe_ctx_t pi = localvqe_new("localvqe-pi-v1-49k-f32.gguf");
-localvqe_process_f32(pi, mic, ref, n_samples, out);
+localvqe_process_f32(pi, mic, ref, n_samples, out);        // whole clip
+// localvqe_process_frame_f32(pi, mic, ref, 256, hop_out); // or per 256-sample hop (16 ms latency)
 localvqe_free(pi);
 ```
 

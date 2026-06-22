@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
     const char* fe_path    = nullptr;   // DAF front-end gguf (GTCRN models)
     std::string out_path   = "enhanced.npy";
     bool wav_mode          = false;
+    bool stream            = false;     // per-hop streaming frame API
     int  threads           = 0;         // 0 = library default
 
     for (int i = 1; i < argc; i++) {
@@ -45,10 +46,13 @@ int main(int argc, char** argv) {
             fe_path = argv[++i];
         } else if (a == "--threads" && i + 1 < argc) {
             threads = atoi(argv[++i]);
+        } else if (a == "--stream") {
+            stream = true;
         } else if (a == "-h" || a == "--help") {
             fprintf(stderr,
                 "Usage: localvqe <model.gguf> --input-npy mic.npy ref.npy [--output enhanced.npy]\n"
                 "       localvqe <model.gguf> --in-wav mic.wav ref.wav [--out-wav enhanced.wav]\n"
+                "  --stream   process per 256-sample hop through the streaming frame API\n"
                 "GTCRN (compact / low-power) models use a v1.4-AEC DAF front-end, found\n"
                 "automatically (embedded in the model, or a localvqe-v1.4-aec-*.gguf beside\n"
                 "it); override with --fe <v1.4-aec.gguf>.\n");
@@ -111,9 +115,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Process
-    std::vector<float> enhanced(n_mic);
-    int ret = localvqe_process_f32(ctx, mic_pcm.data(), ref_pcm.data(), n_mic, enhanced.data());
+    // Process — whole-clip, or per-hop through the streaming frame API.
+    std::vector<float> enhanced(n_mic, 0.0f);
+    int ret = 0;
+    if (stream) {
+        localvqe_reset(ctx);
+        int hop = localvqe_hop_length(ctx);
+        if (hop <= 0) hop = 256;
+        for (int t = 0; t + hop <= n_mic && ret == 0; t += hop)
+            ret = localvqe_process_frame_f32(ctx, mic_pcm.data() + t, ref_pcm.data() + t,
+                                             hop, enhanced.data() + t);
+    } else {
+        ret = localvqe_process_f32(ctx, mic_pcm.data(), ref_pcm.data(), n_mic, enhanced.data());
+    }
     if (ret != 0) {
         fprintf(stderr, "Error: localvqe_process_f32 returned %d: %s\n",
                 ret, localvqe_last_error(ctx));
