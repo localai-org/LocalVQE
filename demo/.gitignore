@@ -1,0 +1,8 @@
+# Render venv + heavy intermediates. The shareable out/sweep.mp4 + out/sweep.gif
+# (embedded in the README) and the baked assets/*.wav ARE committed.
+.venv/
+__pycache__/
+out/frames/
+out/render.json
+out/_pal.png
+out/sweep_silent.mp4

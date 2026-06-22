@@ -1,0 +1,136 @@
+{
+  "sample_rate": 16000,
+  "total_s": 180.0,
+  "n_samples": 2880000,
+  "clips": [
+    {
+      "label": "near-end + noise (5 dB)",
+      "name": "ne_st_noisy",
+      "start_s": 0.0,
+      "end_s": 10.0
+    },
+    {
+      "label": "far-end single-talk (echo)",
+      "name": "fe_st",
+      "start_s": 10.0,
+      "end_s": 20.0
+    },
+    {
+      "label": "double-talk",
+      "name": "dt",
+      "start_s": 20.0,
+      "end_s": 30.0
+    },
+    {
+      "label": "far-end single-talk",
+      "name": "fe_st2",
+      "start_s": 30.0,
+      "end_s": 40.0
+    },
+    {
+      "label": "near-end + light noise (20 dB)",
+      "name": "ne_st_clean",
+      "start_s": 40.0,
+      "end_s": 50.0
+    },
+    {
+      "label": "near-end + noise (5 dB)",
+      "name": "ne_st_noisy",
+      "start_s": 50.0,
+      "end_s": 60.0
+    },
+    {
+      "label": "far-end single-talk (echo)",
+      "name": "fe_st",
+      "start_s": 60.0,
+      "end_s": 70.0
+    },
+    {
+      "label": "double-talk",
+      "name": "dt",
+      "start_s": 70.0,
+      "end_s": 80.0
+    },
+    {
+      "label": "far-end single-talk",
+      "name": "fe_st2",
+      "start_s": 80.0,
+      "end_s": 90.0
+    },
+    {
+      "label": "near-end + light noise (20 dB)",
+      "name": "ne_st_clean",
+      "start_s": 90.0,
+      "end_s": 100.0
+    },
+    {
+      "label": "near-end + noise (5 dB)",
+      "name": "ne_st_noisy",
+      "start_s": 100.0,
+      "end_s": 110.0
+    },
+    {
+      "label": "far-end single-talk (echo)",
+      "name": "fe_st",
+      "start_s": 110.0,
+      "end_s": 120.0
+    },
+    {
+      "label": "double-talk",
+      "name": "dt",
+      "start_s": 120.0,
+      "end_s": 130.0
+    },
+    {
+      "label": "far-end single-talk",
+      "name": "fe_st2",
+      "start_s": 130.0,
+      "end_s": 140.0
+    },
+    {
+      "label": "near-end + light noise (20 dB)",
+      "name": "ne_st_clean",
+      "start_s": 140.0,
+      "end_s": 150.0
+    },
+    {
+      "label": "near-end + noise (5 dB)",
+      "name": "ne_st_noisy",
+      "start_s": 150.0,
+      "end_s": 160.0
+    },
+    {
+      "label": "far-end single-talk (echo)",
+      "name": "fe_st",
+      "start_s": 160.0,
+      "end_s": 170.0
+    },
+    {
+      "label": "double-talk",
+      "name": "dt",
+      "start_s": 170.0,
+      "end_s": 180.0
+    }
+  ],
+  "model": {
+    "label": "LocalVQE-Pi-v1-49k",
+    "n_params": 48965,
+    "gtcrn_ckpt": "gtcrn_ns_aec_os400_move.pt",
+    "gtcrn_sha256": "e560b501d6cf356f476d99235d0edc103489fef6ad3bbc5ed3651e7f43eaa160",
+    "fe_ckpt": "localvqe-v1.4-nsdr-200K.pt",
+    "fe_sha256": "8967a5fe63801b41efe0d8685e6e843565cc5ad4f0d8d00af866f7730c8019d8"
+  },
+  "sources_sha256": {
+    "ne_st_noisy_mic.wav": "9d3fb1b800eddd790a1e033a5d553044173cd42e295a8a033a8d97de4e077445",
+    "ne_st_noisy_ref.wav": "4b1907eaf1a27fdc96774ac001fe11766142aadddbe36a95e563be78b708e59d",
+    "fe_st_mic.wav": "564b26602ebfb64aa55a7646a2e3ec4c76801e8e602cfb94e07e7f0beed60f0c",
+    "fe_st_ref.wav": "390d63e7ea4741e958f4af4eeb1d729c4b58ccf4acce26dc82273f3c12ead0e5",
+    "dt_mic.wav": "8d0c15e56a4c7f387847451952123e8f23161520e81c1ba8878c922f11592a62",
+    "dt_ref.wav": "e931d49e2802c1d7b15750caff1455495cd1dc40d27cb2fe51a8c58cbebe60fe",
+    "fe_st2_mic.wav": "66507ac731a84abd30d4c2cbc7701d16464d705067faef7f1c926049230483c6",
+    "fe_st2_ref.wav": "7e1cef5940243d47e2ac450d7781de0a3f0a805fd8843b77830fb7084e662b71",
+    "ne_st_clean_mic.wav": "c8392be1a0baa7b8f308dab157209c7cf52f22fefe9de4c0e8a07771b5acefad",
+    "ne_st_clean_ref.wav": "16295fb4145e19a50076b0e24ef051186a01a28276532c549416fff9259888f8"
+  },
+  "generator": "demo/gen_assets.py"
+}

@@ -1,0 +1,11 @@
+{
+  "label": "LocalVQE-Pi-v1-49k",
+  "arch": "GTCRN-AEC (~49K params)",
+  "device": "Raspberry Pi 5 · Cortex-A76 · 1 core",
+  "rtf": 0.048,
+  "rt_factor": 21.0,
+  "per_hop_ms": 0.78,
+  "hop_ms": 16.0,
+  "measured": "whole-clip GTCRN-AEC forward (ggml graph), 1 thread, test_gtcrn --bench --ggml on a Raspberry Pi 5 Model B (Ubuntu 24.04); 8 s clip in 388 ms. The DSP echo-cancel front-end runs on top of this on CPU.",
+  "source": "fallback (LocalVQE README, Raspberry Pi line). Re-measure with bench_pi.sh on your own Pi to overwrite."
+}

@@ -39,9 +39,9 @@ factor (higher is faster than realtime).
   speakers play) in addition to the mic.
 - `bf16` GGUFs are ~12 % smaller with identical quality and speed; pick `f32`
   unless download size matters.
-- A separate **Raspberry Pi line** (experimental) — a ~49 K-parameter GTCRN-AEC
-  backend (a distinct architecture, not the v1.x graph) for single-board ARM;
-  ≈21× realtime on one Pi 5 core. See [below](#raspberry-pi-line--gtcrn-aec-experimental).
+- A separate **compact / low-power line** — a ~49 K-parameter GTCRN-AEC backend
+  (a distinct architecture, not the v1.x graph) aimed at lower-power CPUs;
+  ≈21× realtime on a single Raspberry Pi 5 core. See [below](#compact-line--gtcrn-aec-for-lower-power-cpus).
 
 ### Weight files on [Hugging Face](https://huggingface.co/LocalAI-io/LocalVQE)
 
@@ -52,7 +52,7 @@ factor (higher is faster than realtime).
 | `localvqe-v1.4-aec-200K-f32.gguf` / `-bf16.gguf` | v1.4-AEC (echo only) |
 | `localvqe-v1.4-aec-2.7K-f32.gguf` | v1.4-AEC front-end only |
 | `localvqe-v1.1-1.3M-f32.gguf`, `localvqe-v1-1.3M-f32.gguf` | older releases |
-| `localvqe-pi-v1-49k-f32.gguf`, `localvqe-pi-aec-v1-49k-f32.gguf` | Raspberry Pi GTCRN-AEC line — experimental (full enhance / echo-only) |
+| `localvqe-pi-v1-49k-f32.gguf`, `localvqe-pi-aec-v1-49k-f32.gguf` | Compact GTCRN-AEC line for lower-power CPUs (full enhance / echo-only) |
 
 v1.4-AEC is GGUF-only (no `.pt`). GGUF integrity is checked at load time against
 a built-in SHA256 allowlist (`ggml/model_hash.cpp`). PyTorch checkpoint hashes:
@@ -151,27 +151,29 @@ Working set the model adds on top of the ~7 MiB binary baseline:
 | v1.2 (1.3 M) | +10.0 MiB | 19.6 MiB |
 | v1.4-AEC (203 K) | +6.7 MiB | 17.0 MiB |
 
-### Raspberry Pi line — GTCRN-AEC (experimental)
+### Compact line — GTCRN-AEC (for lower-power CPUs)
 
-A separate, much smaller backend for single-board ARM: a ~49 K-parameter
-**GTCRN-AEC** network — a distinct architecture based on
+A separate, much smaller second line of models for lower-power CPUs: a
+~49 K-parameter **GTCRN-AEC** network — a distinct architecture based on
 [GTCRN](https://github.com/Xiaobin-Rong/gtcrn) (Rong et al., ICASSP 2024) — with
 the project's DSP echo-cancellation front-end. Two variants share the
 architecture: a full enhancer (echo + NS + dereverb) and an echo-only
-"keep-noise" build. Cross-compile for aarch64 with `ggml/docker/Dockerfile.arm64`
-(docker buildx + qemu, Cortex-A76 target).
+"keep-noise" build. Runs on any CPU; for single-board ARM, cross-compile for
+aarch64 with `ggml/docker/Dockerfile.arm64` (docker buildx + qemu).
 
-A graphical demo of the speed ([`demo/`](demo/)): a scrolling spectrogram whose
-processing frontier sweeps ahead of real-time playback, cleaning a 3-minute
-track in ~9 s on one Pi 5 core. The two bars track playback vs processing over
-the whole track.
+Run it from the CLI exactly like any other model:
 
-![Pi AEC sweep: a scrolling spectrogram whose processing frontier reveals the cleaned output ~21x faster than real-time playback on one Raspberry Pi 5 core](demo/out/sweep.gif)
+```bash
+./ggml/build/bin/localvqe localvqe-pi-v1-49k-f32.gguf \
+    --in-wav mic.wav ref.wav --out-wav enhanced.wav
+```
 
-Whole-clip RTF on the real ggml graph (`test_gtcrn --bench` on a Raspberry Pi 5
-Model B, Cortex-A76, Ubuntu 24.04), parity-verified to the PyTorch reference
-within ~1e-6 on-device (~0.78 ms per 16 ms hop single-threaded). RTF is identical
-for both variants:
+![Compact-line AEC sweep: a scrolling spectrogram whose processing frontier reveals the cleaned output ~21x faster than real-time playback on a single Raspberry Pi 5 core](demo/out/sweep.gif)
+
+Whole-clip RTF on the real ggml graph, benchmarked on a Raspberry Pi 5 (one
+example of a low-power target; `test_gtcrn --bench`, Cortex-A76, Ubuntu 24.04),
+parity-verified to the PyTorch reference within ~1e-6 on-device (~0.78 ms per
+16 ms hop single-threaded). RTF is identical for both variants:
 
 | Threads | 8 s clip | RTF | RT |
 |--:|--:|--:|--:|
@@ -225,6 +227,11 @@ localvqe_ctx_t ctx = localvqe_new("localvqe-v1.3-4.8M-f32.gguf");
 localvqe_process_f32(ctx, mic, ref, n_samples, out);   // whole clip
 // or per 256-sample hop for real-time: localvqe_process_frame_f32(...)
 localvqe_free(ctx);
+
+// Compact / low-power line (GTCRN): same call, whole-clip only.
+localvqe_ctx_t pi = localvqe_new("localvqe-pi-v1-49k-f32.gguf");
+localvqe_process_f32(pi, mic, ref, n_samples, out);
+localvqe_free(pi);
 ```
 
 See `ggml/example_purego_test.go` for a Go / `purego` binding.
@@ -299,7 +306,7 @@ produces APA / BibTeX), and the upstream DeepVQE paper:
 }
 ```
 
-The experimental Raspberry Pi backend is based on **GTCRN** — please also cite:
+The compact GTCRN-AEC line is based on **GTCRN** — please also cite:
 
 ```bibtex
 @inproceedings{rong2024gtcrn,

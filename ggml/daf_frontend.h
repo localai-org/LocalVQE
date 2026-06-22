@@ -83,6 +83,11 @@ bool daf_init(daf_frontend& fe, const dvqe_graph_model& m);
 #include "localvqe_model.h"
 bool daf_init_npy(daf_frontend& fe, const localvqe_model& m);
 
+/// Init directly from a raw NpyArray tensor map — used when a GTCRN gguf embeds
+/// the DAF front-end under daf.* (a self-contained compact-line model). Returns
+/// false if no daf.* tensors are present.
+bool daf_init_tensors(daf_frontend& fe, const std::map<std::string, NpyArray>& tensors);
+
 /// Reset all online state (new utterance).
 void daf_reset(daf_frontend& fe);
 

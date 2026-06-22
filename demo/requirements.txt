@@ -1,0 +1,7 @@
+# Render-side deps (host venv). The bake step (gen_assets.py) needs torch +
+# the training tree and runs in the LocalVQE training Docker instead — it is
+# NOT installed here.
+numpy
+scipy
+soundfile
+matplotlib

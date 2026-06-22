@@ -139,6 +139,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gtcrn/gtcrn.cpp")
     target_include_directories(dvqe_gtcrn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/gtcrn)
     add_executable(test_gtcrn gtcrn/test_gtcrn.cpp)
     target_link_libraries(test_gtcrn PRIVATE dvqe_gtcrn)
+    # The GTCRN (compact / low-power) line is also runnable through the C API +
+    # CLI (wav->wav via the DAF front-end + STFT/ISTFT). Fold it into the core
+    # graph lib so every consumer (localvqe, liblocalvqe, bench, ...) gains it.
+    if(TARGET dvqe_graph)
+        target_link_libraries(dvqe_graph PUBLIC dvqe_gtcrn)
+        target_compile_definitions(dvqe_graph PUBLIC LOCALVQE_HAS_GTCRN)
+    endif()
 endif()
 
 # DCT matmul layout test (validates ggml_mul_mat vs analytic DCT-II)

@@ -11,14 +11,39 @@
 #include "daf_frontend.h"
 #include "localvqe_graph.h"
 #include "noise_gate.h"
+#include "gguf.h"
+
+#ifdef LOCALVQE_HAS_GTCRN
+#include "gtcrn.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
 #include <string>
 #include <vector>
+
+// Read a string-valued KV from a gguf, or "" if absent/unreadable.
+static std::string gguf_str_kv(const char* path, const char* key) {
+    struct gguf_init_params p = { /*no_alloc=*/true, /*ctx=*/nullptr };
+    struct gguf_context* gc = gguf_init_from_file(path, p);
+    if (!gc) return "";
+    std::string v;
+    int64_t kid = gguf_find_key(gc, key);
+    if (kid >= 0 && gguf_get_kv_type(gc, kid) == GGUF_TYPE_STRING)
+        v = gguf_get_val_str(gc, kid);
+    gguf_free(gc);
+    return v;
+}
+
+// general.architecture — lets the C API route GTCRN (compact / low-power)
+// models down a different path than the v1.x streaming graph.
+static std::string gguf_architecture(const char* path) {
+    return gguf_str_kv(path, "general.architecture");
+}
 
 // ── Internal context ─────────────────────────────────────────────────────────
 
@@ -32,6 +57,17 @@ struct localvqe_ctx {
     dvqe_graph_model graph_model;
     dvqe_stream_graph stream_graph;
     std::string last_error;
+
+    // Compact / low-power line (arch="gtcrn"): the DAF front-end above runs on
+    // a separate v1.4-AEC `graph_model`, and the GTCRN backend (its own STFT)
+    // consumes the (e, yhat). Whole-clip via localvqe_process_f32; the per-hop
+    // frame API is not applicable (the GTCRN STFT is non-streaming here).
+    bool is_gtcrn = false;
+    bool fe_model_loaded = false;  // gtcrn: graph_model holds a separate front-end
+#ifdef LOCALVQE_HAS_GTCRN
+    GtcrnGraph* gt_graph = nullptr;
+    GtcrnModel* gt_host  = nullptr;
+#endif
 
     // Front-end-only build (2.7K release): mask graph never built; each
     // hop emits the adaptive filter's output `e` directly.
@@ -71,15 +107,136 @@ static void ensure_size(std::vector<float>& v, size_t n) {
 
 struct localvqe_options {
     std::string model_path;
+    std::string frontend_path;  // GTCRN / low-power line: separate DAF gguf
     std::string backend_name = "CPU";
     int device_index = 0;
     int n_threads = 0;  // 0 = auto / honour GGML_NTHREADS env var
 };
 
+#ifdef LOCALVQE_HAS_GTCRN
+static bool file_exists(const std::string& p) {
+    if (p.empty()) return false;
+    FILE* f = std::fopen(p.c_str(), "rb");
+    if (!f) return false;
+    std::fclose(f);
+    return true;
+}
+
+static std::string dir_of(const char* path) {
+    std::string s(path ? path : "");
+    size_t pos = s.find_last_of("/\\");
+    return pos == std::string::npos ? std::string() : s.substr(0, pos + 1);
+}
+
+// Decide the DAF front-end for a GTCRN (compact-line) model without the caller
+// naming it. The whole compact line shares the same v1.4-AEC DAF, so this needs
+// no per-version logic: an explicit "localvqe.frontend" hint baked into the
+// gguf wins (forward-compatible), otherwise a v1.4-AEC gguf sitting next to the
+// model. Returns "" if none is found.
+static std::string resolve_gtcrn_frontend(const char* model_path) {
+    std::string dir = dir_of(model_path);
+    std::string hint = gguf_str_kv(model_path, "localvqe.frontend");
+    if (!hint.empty()) {
+        if (file_exists(hint)) return hint;          // absolute / cwd-relative
+        if (file_exists(dir + hint)) return dir + hint;  // next to the model
+    }
+    // Released v1.4-AEC front-ends, lightest first (the 2.7K is the DAF alone).
+    const char* names[] = {
+        "localvqe-v1.4-aec-2.7K-f32.gguf",
+        "localvqe-v1.4-aec-200K-f32.gguf",
+        "localvqe-v1.4-aec-200K-bf16.gguf",
+    };
+    for (const char* n : names)
+        if (file_exists(dir + n)) return dir + n;
+    return "";
+}
+
+// Build a GTCRN (compact / low-power) context. The compact net runs on a
+// v1.4-AEC DAF residual; the front-end comes from, in order: (1) daf.* tensors
+// embedded in the model gguf itself (a self-contained file — nothing else
+// needed), (2) an explicit frontend_path, (3) a v1.4-AEC gguf auto-detected
+// next to the model. Returns the populated ctx (early-out from make_ctx), or 0.
+static localvqe_ctx_t make_ctx_gtcrn(localvqe_ctx* ctx, const char* model_path,
+                                     const char* frontend_path,
+                                     const char* backend_name, int device_index,
+                                     int n_threads) {
+    // GTCRN backend first — loading the host weights also exposes any embedded
+    // daf.* tensors, so we can tell a self-contained model from one that needs
+    // a separate front-end.
+    ctx->gt_graph = new (std::nothrow) GtcrnGraph();
+    ctx->gt_host  = new (std::nothrow) GtcrnModel();
+    int gt_threads = n_threads > 0 ? n_threads : 1;
+    if (!ctx->gt_graph || !ctx->gt_host ||
+        !ctx->gt_graph->load(model_path, gt_threads, false) ||
+        !ctx->gt_host->load(model_path, false)) {
+        fprintf(stderr, "localvqe: failed to load GTCRN gguf: %s\n", model_path);
+        delete ctx->gt_graph;
+        delete ctx->gt_host;
+        delete ctx;
+        return 0;
+    }
+
+    // (1) Self-contained: the model embeds its own DAF front-end.
+    if (daf_init_tensors(ctx->daf, ctx->gt_host->W)) {
+        ctx->graph_model.hparams.sample_rate = 16000;
+        ctx->graph_model.hparams.hop_length  = 256;
+        ctx->graph_model.hparams.n_fft       = 512;
+        ctx->is_gtcrn = true;
+        ctx->daf_e.assign(256, 0.0f);
+        ctx->daf_yhat.assign(256, 0.0f);
+        fprintf(stderr, "localvqe: GTCRN backend active (compact / low-power "
+                "line), embedded DAF front-end\n");
+        return reinterpret_cast<localvqe_ctx_t>(ctx);
+    }
+
+    // (2)/(3) Need a separate front-end gguf: explicit, else auto-detect.
+    std::string resolved;
+    if (!frontend_path || !*frontend_path) {
+        resolved = resolve_gtcrn_frontend(model_path);
+        if (resolved.empty()) {
+            fprintf(stderr, "localvqe: GTCRN model '%s' needs a v1.4-AEC DAF "
+                    "front-end and none was found next to it. Pass one explicitly "
+                    "(--fe / localvqe_options_set_frontend_path), or place e.g. "
+                    "localvqe-v1.4-aec-2.7K-f32.gguf in the same directory.\n",
+                    model_path);
+            delete ctx->gt_graph; delete ctx->gt_host;
+            delete ctx;
+            return 0;
+        }
+        frontend_path = resolved.c_str();
+        fprintf(stderr, "localvqe: auto-selected DAF front-end %s\n", frontend_path);
+    }
+    if (!load_graph_model_ex(frontend_path, ctx->graph_model,
+                             backend_name, device_index, true, n_threads)) {
+        fprintf(stderr, "localvqe: failed to load front-end gguf: %s\n", frontend_path);
+        delete ctx->gt_graph; delete ctx->gt_host;
+        delete ctx;
+        return 0;
+    }
+    ctx->fe_model_loaded = true;
+    if (!daf_init(ctx->daf, ctx->graph_model)) {
+        fprintf(stderr, "localvqe: front-end gguf %s has no DAF tensors "
+                "(use a v1.4-AEC model)\n", frontend_path);
+        free_graph_model(ctx->graph_model);
+        delete ctx->gt_graph; delete ctx->gt_host;
+        delete ctx;
+        return 0;
+    }
+    ctx->is_gtcrn = true;
+    int hop = ctx->graph_model.hparams.hop_length;
+    ctx->daf_e.assign(hop, 0.0f);
+    ctx->daf_yhat.assign(hop, 0.0f);
+    fprintf(stderr, "localvqe: GTCRN backend active (compact / low-power line), "
+            "DAF front-end from %s\n", frontend_path);
+    return reinterpret_cast<localvqe_ctx_t>(ctx);
+}
+#endif  // LOCALVQE_HAS_GTCRN
+
 static localvqe_ctx_t make_ctx(const char* model_path,
                                const char* backend_name,
                                int device_index,
-                               int n_threads_override = 0) {
+                               int n_threads_override = 0,
+                               const char* frontend_path = nullptr) {
     auto* ctx = new (std::nothrow) localvqe_ctx;
     if (!ctx) return 0;
 
@@ -90,6 +247,15 @@ static localvqe_ctx_t make_ctx(const char* model_path,
             n_threads = std::atoi(env_threads);
         }
     }
+
+#ifdef LOCALVQE_HAS_GTCRN
+    if (gguf_architecture(model_path) == "gtcrn") {
+        return make_ctx_gtcrn(ctx, model_path, frontend_path,
+                              backend_name, device_index, n_threads);
+    }
+#else
+    (void)frontend_path;
+#endif
 
     if (!load_graph_model_ex(model_path, ctx->graph_model,
                              backend_name, device_index, true, n_threads)) {
@@ -138,6 +304,11 @@ LOCALVQE_API localvqe_ctx_t localvqe_new(const char* model_path) {
     return make_ctx(model_path, "CPU", 0);
 }
 
+LOCALVQE_API localvqe_ctx_t localvqe_new_with_frontend(const char* model_path,
+                                                       const char* frontend_path) {
+    return make_ctx(model_path, "CPU", 0, 0, frontend_path);
+}
+
 LOCALVQE_API localvqe_options_t localvqe_options_new(void) {
     return reinterpret_cast<localvqe_options_t>(new (std::nothrow) localvqe_options);
 }
@@ -159,6 +330,14 @@ LOCALVQE_API int localvqe_options_set_backend(localvqe_options_t handle,
     if (!handle) return -1;
     if (!backend_name || !*backend_name) return -2;
     reinterpret_cast<localvqe_options*>(handle)->backend_name = backend_name;
+    return 0;
+}
+
+LOCALVQE_API int localvqe_options_set_frontend_path(localvqe_options_t handle,
+                                                    const char* frontend_path) {
+    if (!handle) return -1;
+    if (!frontend_path || !*frontend_path) return -2;
+    reinterpret_cast<localvqe_options*>(handle)->frontend_path = frontend_path;
     return 0;
 }
 
@@ -188,7 +367,9 @@ LOCALVQE_API localvqe_ctx_t localvqe_new_with_options(localvqe_options_t handle)
     return make_ctx(opts->model_path.c_str(),
                     opts->backend_name.c_str(),
                     opts->device_index,
-                    opts->n_threads);
+                    opts->n_threads,
+                    opts->frontend_path.empty() ? nullptr
+                                                : opts->frontend_path.c_str());
 }
 
 LOCALVQE_API void localvqe_list_devices(void) {
@@ -198,6 +379,12 @@ LOCALVQE_API void localvqe_list_devices(void) {
 LOCALVQE_API void localvqe_print_profile(localvqe_ctx_t handle) {
     if (!handle) return;
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+#ifdef LOCALVQE_HAS_GTCRN
+    if (ctx->is_gtcrn) {
+        printf("GTCRN backend (compact / low-power line); no streaming graph profile.\n");
+        return;
+    }
+#endif
     print_memory_budget(ctx->graph_model, ctx->stream_graph);
     putchar('\n');
     print_op_histogram(ctx->stream_graph.graph);
@@ -207,6 +394,15 @@ LOCALVQE_API void localvqe_print_profile(localvqe_ctx_t handle) {
 LOCALVQE_API void localvqe_free(localvqe_ctx_t handle) {
     if (!handle) return;
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+#ifdef LOCALVQE_HAS_GTCRN
+    if (ctx->is_gtcrn) {
+        delete ctx->gt_graph;
+        delete ctx->gt_host;
+        if (ctx->fe_model_loaded) free_graph_model(ctx->graph_model);
+        delete ctx;
+        return;
+    }
+#endif
     free_stream_graph(ctx->stream_graph);
     free_graph_model(ctx->graph_model);
     delete ctx;
@@ -281,12 +477,63 @@ static void stream_one_frame(localvqe_ctx* ctx, const float* mic,
     std::memset(ctx->ola.data() + (n_fft - hop), 0, hop * sizeof(float));
 }
 
+#ifdef LOCALVQE_HAS_GTCRN
+// Whole-clip GTCRN (compact / low-power line): DAF echo-cancel front-end ->
+// residual e + echo estimate yhat; per-utterance RMS-normalise to 0.05; GTCRN
+// complex-ratio mask on its own 512/256 STFT; iSTFT; undo the gain. Mirrors the
+// PyTorch reference the gguf was exported from. The trailing partial DAF hop
+// (< 128 samples) is zero-filled to keep the output sample-aligned.
+static int process_gtcrn_clip(localvqe_ctx* ctx, const float* mic,
+                              const float* ref, int n_samples, float* out) {
+    const int M = daf_frontend::M;
+    int n = n_samples / M * M;
+    if (n <= 0) {
+        ctx->last_error = "Input too short for the GTCRN front-end";
+        return -2;
+    }
+    daf_reset(ctx->daf);
+    ctx->daf.enable_prealign = true;
+    daf_prime_delay(ctx->daf, mic, ref, n);   // file mode: lock the bulk delay
+    ensure_size(ctx->daf_e, n);
+    ensure_size(ctx->daf_yhat, n);
+    daf_process(ctx->daf, mic, ref, n, ctx->daf_e.data(), ctx->daf_yhat.data());
+
+    float* e  = ctx->daf_e.data();
+    float* yh = ctx->daf_yhat.data();
+    double sq = 0.0;
+    for (int i = 0; i < n; ++i) sq += (double)e[i] * e[i];
+    float gain = 0.05f / ((float)std::sqrt(sq / n) + 1e-6f);
+    gain = std::min(50.0f, std::max(0.05f, gain));
+    for (int i = 0; i < n; ++i) { e[i] *= gain; yh[i] *= gain; }
+
+    int T = ctx->gt_host->n_frames(n);
+    std::vector<float> spec_e = ctx->gt_host->stft(e, n);
+    std::vector<float> spec_y = ctx->gt_host->stft(yh, n);
+    std::vector<float> enh = ctx->gt_graph->forward(spec_e.data(), spec_y.data(), T);
+    std::vector<float> y = ctx->gt_host->istft(enh.data(), T, n);
+    float inv = 1.0f / gain;
+    for (int i = 0; i < n; ++i) out[i] = y[i] * inv;
+    if (n < n_samples) std::memset(out + n, 0, (size_t)(n_samples - n) * sizeof(float));
+
+    if (ctx->noise_gate_enabled) {
+        int hop = ctx->graph_model.hparams.hop_length;
+        for (int t = 0; t + hop <= n_samples; t += hop)
+            localvqe::apply_noise_gate(out + t, hop, ctx->noise_gate_threshold_dbfs);
+    }
+    return 0;
+}
+#endif  // LOCALVQE_HAS_GTCRN
+
 LOCALVQE_API int localvqe_process_f32(localvqe_ctx_t handle,
                                      const float* mic, const float* ref,
                                      int n_samples, float* out) {
     if (!handle) return -1;
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
     ctx->last_error.clear();
+
+#ifdef LOCALVQE_HAS_GTCRN
+    if (ctx->is_gtcrn) return process_gtcrn_clip(ctx, mic, ref, n_samples, out);
+#endif
 
     auto& hp = ctx->graph_model.hparams;
     int n_fft = hp.n_fft;
@@ -386,6 +633,13 @@ LOCALVQE_API int localvqe_process_frame_f32(localvqe_ctx_t handle,
                                            int hop_samples, float* out) {
     if (!handle) return -1;
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+#ifdef LOCALVQE_HAS_GTCRN
+    if (ctx->is_gtcrn) {
+        ctx->last_error = "GTCRN models are whole-clip; call localvqe_process_f32, "
+                          "not the per-hop frame API";
+        return -3;
+    }
+#endif
     if (hop_samples != ctx->graph_model.hparams.hop_length) return -2;
     stream_one_frame(ctx, mic, ref, out);
     return 0;
@@ -413,6 +667,12 @@ LOCALVQE_API int localvqe_process_frame_s16(localvqe_ctx_t handle,
 LOCALVQE_API void localvqe_reset(localvqe_ctx_t handle) {
     if (!handle) return;
     auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+#ifdef LOCALVQE_HAS_GTCRN
+    if (ctx->is_gtcrn) {
+        if (ctx->daf.loaded) daf_reset(ctx->daf);  // re-primed per clip anyway
+        return;
+    }
+#endif
     if (!ctx->daf_standalone)
         reset_stream_graph(ctx->stream_graph, ctx->graph_model);
     if (ctx->daf.loaded) daf_reset(ctx->daf);

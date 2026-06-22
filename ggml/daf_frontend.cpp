@@ -62,44 +62,48 @@ static bool fetchw(const dvqe_graph_model& m, const char* name, std::vector<floa
     return true;
 }
 
-static bool fetchw_npy(const localvqe_model& m, const char* name,
+static bool fetchw_npy(const std::map<std::string, NpyArray>& t, const char* name,
                        std::vector<float>& v) {
-    auto it = m.tensors.find(name);
-    if (it == m.tensors.end()) { fprintf(stderr, "daf: missing %s\n", name); return false; }
+    auto it = t.find(name);
+    if (it == t.end()) { fprintf(stderr, "daf: missing %s\n", name); return false; }
     v = it->second.data;
     return true;
 }
 
-bool daf_init_npy(daf_frontend& fe, const localvqe_model& m) {
+bool daf_init_tensors(daf_frontend& fe, const std::map<std::string, NpyArray>& t) {
     fe.loaded = false;
-    if (m.tensors.find("daf.glob.gru.weight_ih") == m.tensors.end()) return false;
+    if (t.find("daf.glob.gru.weight_ih") == t.end()) return false;
     bool ok = true;
-    ok &= fetchw_npy(m, "daf.glob.norm.ln.weight", fe.g_ln_w);
-    ok &= fetchw_npy(m, "daf.glob.norm.ln.bias",   fe.g_ln_b);
-    ok &= fetchw_npy(m, "daf.glob.gru.weight_ih",  fe.g_wih);
-    ok &= fetchw_npy(m, "daf.glob.gru.weight_hh",  fe.g_whh);
-    ok &= fetchw_npy(m, "daf.glob.gru.bias_ih",    fe.g_bih);
-    ok &= fetchw_npy(m, "daf.glob.gru.bias_hh",    fe.g_bhh);
-    ok &= fetchw_npy(m, "daf.bins.norm.ln.weight", fe.b_ln_w);
-    ok &= fetchw_npy(m, "daf.bins.norm.ln.bias",   fe.b_ln_b);
-    ok &= fetchw_npy(m, "daf.bins.gru.weight_ih",  fe.b_wih);
-    ok &= fetchw_npy(m, "daf.bins.gru.weight_hh",  fe.b_whh);
-    ok &= fetchw_npy(m, "daf.bins.gru.bias_ih",    fe.b_bih);
-    ok &= fetchw_npy(m, "daf.bins.gru.bias_hh",    fe.b_bhh);
-    ok &= fetchw_npy(m, "daf.part.ln.weight",      fe.p_ln_w);
-    ok &= fetchw_npy(m, "daf.part.ln.bias",        fe.p_ln_b);
-    ok &= fetchw_npy(m, "daf.part.gru.weight_ih",  fe.p_wih);
-    ok &= fetchw_npy(m, "daf.part.gru.weight_hh",  fe.p_whh);
-    ok &= fetchw_npy(m, "daf.part.gru.bias_ih",    fe.p_bih);
-    ok &= fetchw_npy(m, "daf.part.gru.bias_hh",    fe.p_bhh);
-    ok &= fetchw_npy(m, "daf.head.weight",         fe.head_w);
-    ok &= fetchw_npy(m, "daf.head.bias",           fe.head_b);
-    ok &= fetchw_npy(m, "daf.part.head.weight",    fe.p_head_w);
-    ok &= fetchw_npy(m, "daf.part.head.bias",      fe.p_head_b);
+    ok &= fetchw_npy(t, "daf.glob.norm.ln.weight", fe.g_ln_w);
+    ok &= fetchw_npy(t, "daf.glob.norm.ln.bias",   fe.g_ln_b);
+    ok &= fetchw_npy(t, "daf.glob.gru.weight_ih",  fe.g_wih);
+    ok &= fetchw_npy(t, "daf.glob.gru.weight_hh",  fe.g_whh);
+    ok &= fetchw_npy(t, "daf.glob.gru.bias_ih",    fe.g_bih);
+    ok &= fetchw_npy(t, "daf.glob.gru.bias_hh",    fe.g_bhh);
+    ok &= fetchw_npy(t, "daf.bins.norm.ln.weight", fe.b_ln_w);
+    ok &= fetchw_npy(t, "daf.bins.norm.ln.bias",   fe.b_ln_b);
+    ok &= fetchw_npy(t, "daf.bins.gru.weight_ih",  fe.b_wih);
+    ok &= fetchw_npy(t, "daf.bins.gru.weight_hh",  fe.b_whh);
+    ok &= fetchw_npy(t, "daf.bins.gru.bias_ih",    fe.b_bih);
+    ok &= fetchw_npy(t, "daf.bins.gru.bias_hh",    fe.b_bhh);
+    ok &= fetchw_npy(t, "daf.part.ln.weight",      fe.p_ln_w);
+    ok &= fetchw_npy(t, "daf.part.ln.bias",        fe.p_ln_b);
+    ok &= fetchw_npy(t, "daf.part.gru.weight_ih",  fe.p_wih);
+    ok &= fetchw_npy(t, "daf.part.gru.weight_hh",  fe.p_whh);
+    ok &= fetchw_npy(t, "daf.part.gru.bias_ih",    fe.p_bih);
+    ok &= fetchw_npy(t, "daf.part.gru.bias_hh",    fe.p_bhh);
+    ok &= fetchw_npy(t, "daf.head.weight",         fe.head_w);
+    ok &= fetchw_npy(t, "daf.head.bias",           fe.head_b);
+    ok &= fetchw_npy(t, "daf.part.head.weight",    fe.p_head_w);
+    ok &= fetchw_npy(t, "daf.part.head.bias",      fe.p_head_b);
     if (!ok) return false;
     daf_reset(fe);
     fe.loaded = true;
     return true;
+}
+
+bool daf_init_npy(daf_frontend& fe, const localvqe_model& m) {
+    return daf_init_tensors(fe, m.tensors);
 }
 
 bool daf_init(daf_frontend& fe, const dvqe_graph_model& m) {

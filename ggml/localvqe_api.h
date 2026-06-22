@@ -43,8 +43,26 @@ typedef uintptr_t localvqe_options_t;
  * For anything other than the defaults, use the options-builder API
  * below — it is FFI-friendly (no struct layouts crossed) and can be
  * extended with new setters without breaking existing callers.
+ *
+ * Compact / low-power line: GTCRN models (arch="gtcrn") carry no
+ * echo-cancel front-end, so they additionally need a v1.4-AEC gguf as the
+ * front-end. localvqe_new() resolves it automatically: a front-end embedded in
+ * the model gguf (a self-contained file) wins, else a localvqe-v1.4-aec-*.gguf
+ * sitting next to the model (or a "localvqe.frontend" hint baked into the gguf).
+ * If none is found it returns 0 — name one with localvqe_new_with_frontend() or
+ * localvqe_options_set_frontend_path().
  */
 LOCALVQE_API localvqe_ctx_t localvqe_new(const char* model_path);
+
+/**
+ * Create a context for a model that needs a separate front-end gguf
+ * (the GTCRN / low-power line). `frontend_path` is a v1.4-AEC gguf whose
+ * DAF echo-cancel front-end feeds the GTCRN backend. For models that embed
+ * their own front-end, pass frontend_path = NULL (equivalent to
+ * localvqe_new). Returns an opaque handle, or 0 on failure.
+ */
+LOCALVQE_API localvqe_ctx_t localvqe_new_with_frontend(const char* model_path,
+                                                       const char* frontend_path);
 
 /* ── Options builder ────────────────────────────────────────────────────────
  *
@@ -75,6 +93,15 @@ LOCALVQE_API int localvqe_options_set_backend(localvqe_options_t opts,
                                               const char* backend_name);
 LOCALVQE_API int localvqe_options_set_device(localvqe_options_t opts,
                                              int device_index);
+
+/**
+ * Set the front-end gguf for models that need a separate echo-cancel
+ * front-end (the GTCRN / low-power line). Ignored for models that embed
+ * their own. Returns 0 on success, -1 on a null handle, -2 on a null/empty
+ * path.
+ */
+LOCALVQE_API int localvqe_options_set_frontend_path(localvqe_options_t opts,
+                                                    const char* frontend_path);
 
 /**
  * Override the CPU thread count used by the ggml backend.
