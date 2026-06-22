@@ -552,7 +552,7 @@ static uint32_t gguf_u32(struct gguf_context* ctx, const char* key) {
     return idx >= 0 ? gguf_get_val_u32(ctx, idx) : 0;
 }
 
-static void ensure_backends_loaded() {
+void ensure_backends_loaded() {
     static std::once_flag f;
     std::call_once(f, []() {
         ggml_backend_load_all();

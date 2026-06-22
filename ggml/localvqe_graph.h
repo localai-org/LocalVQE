@@ -50,6 +50,13 @@ bool load_graph_model_ex(const char* path, dvqe_graph_model& model,
                          const char* backend_name, int device_index,
                          bool verbose, int n_threads);
 
+/// Register ggml backends, self-resolving the embedded-backend directory from
+/// this module's own path (dladdr) so it works when loaded via ctypes/dlopen
+/// with no executable on PATH. Idempotent. Call before using the backend
+/// registry directly (e.g. the GTCRN path, which doesn't go through
+/// load_graph_model_ex).
+void ensure_backends_loaded();
+
 /// Print every registered backend + device to `out`. Indices passed to
 /// load_graph_model_ex() match the per-backend ordering printed here.
 /// Calls ggml_backend_load_all() lazily.

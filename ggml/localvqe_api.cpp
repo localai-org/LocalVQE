@@ -160,6 +160,11 @@ static localvqe_ctx_t make_ctx_gtcrn(localvqe_ctx* ctx, const char* model_path,
                                      const char* frontend_path,
                                      const char* backend_name, int device_index,
                                      int n_threads) {
+    // Register ggml backends self-resolving from this module's dir — the
+    // GTCRN path uses the backend registry directly, and the self-contained
+    // case never calls load_graph_model_ex (which would otherwise do this).
+    ensure_backends_loaded();
+
     // GTCRN backend first — loading the host weights also exposes any embedded
     // daf.* tensors, so we can tell a self-contained model from one that needs
     // a separate front-end.
