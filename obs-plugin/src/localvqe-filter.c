@@ -25,8 +25,8 @@
  * to bound the up-resample scratch buffer. */
 #define LVQE_MAX_FRAMES_PER_CHUNK 65536u
 
-/* If successive chunks' timestamps diverge from the rate-extrapolated
- * expectation by more than this, treat it as a real discontinuity
+/* If successive chunks' timestamps leave a forward gap of more than this,
+ * or jump backwards beyond the queued head, treat it as a discontinuity
  * (Media Source seek/loop, source restart, OBS clock reset) — flush
  * the queue so head_ts can re-stamp from the new chunk.
  *
@@ -111,6 +111,7 @@ struct lvqe_filter {
 	 * resampler jitter left stale mic tail bytes spliced into the
 	 * output → constant chunk-boundary crackle. */
 	struct deque out_obs[MAX_AV_PLANES];
+	uint64_t output_underflows;
 
 	float hop_mic[LVQE_HOP];
 	float hop_ref[LVQE_HOP];
@@ -128,8 +129,6 @@ struct lvqe_filter {
 	bool         ref_16k_has_ts;
 	audio_resampler_t *ref_down;
 
-	/* Reported algorithmic latency: one hop @ 16 kHz, in ns. */
-	uint64_t latency_ns;
 };
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -161,10 +160,10 @@ static bool obs_mix_config_ok(const struct lvqe_filter *f, const char *who)
 	return false;
 }
 
-/* If the new chunk's timestamp diverges from the rate-extrapolated head
- * of the queue by more than LVQE_TS_DISCONTINUITY_NS, flush the queue
- * (the next push will re-stamp head_ts from `chunk_ts`). Returns true
- * if a flush happened. `label` distinguishes mic vs ref in the log. */
+/* Flush on a large forward gap, or when the new chunk jumps backwards
+ * beyond the queued head.  An overlap with the predicted queue tail is
+ * normal and must not flush it.  The next push re-stamps head_ts from
+ * `chunk_ts`. `label` distinguishes mic vs ref in the log. */
 static bool flush_on_ts_discontinuity(struct deque *q,
 				      uint64_t *head_ts, bool *has_ts,
 				      uint64_t chunk_ts, const char *label)
@@ -173,8 +172,16 @@ static bool flush_on_ts_discontinuity(struct deque *q,
 	uint64_t queue_samples = q->size / sizeof(float);
 	int64_t skew = (int64_t)chunk_ts -
 		       (int64_t)(*head_ts + samples_to_ns(queue_samples));
-	uint64_t abs_skew = (uint64_t)(skew < 0 ? -skew : skew);
-	if (abs_skew <= LVQE_TS_DISCONTINUITY_NS) return false;
+
+	/* A negative skew normally means OBS delivered an overlapping source
+	 * block (OBS 32 does this for monitored/global audio sources) or that
+	 * the reference queue is deliberately ahead of the mic.  Neither is a
+	 * clock reset.  Only regard it as a backwards discontinuity when the
+	 * new block predates the queue *head*, not merely its predicted tail. */
+	bool forward_gap = skew > (int64_t)LVQE_TS_DISCONTINUITY_NS;
+	bool before_head = chunk_ts < *head_ts &&
+			   *head_ts - chunk_ts > LVQE_TS_DISCONTINUITY_NS;
+	if (!forward_gap && !before_head) return false;
 	LVQE_BLOG(LOG_INFO,
 		  "%s timestamp discontinuity (%lld ns skew); flushing queue",
 		  label, (long long)skew);
@@ -484,8 +491,18 @@ static void *lvqe_create(obs_data_t *settings, obs_source_t *source)
 
 	build_io_resamplers(f);
 
-	/* one 16 ms hop @ 16 kHz */
-	f->latency_ns = samples_to_ns(LVQE_HOP);
+	/* filter_audio must return one block for every block it receives.
+	 * Seed the output rings with the algorithmic delay so the first model
+	 * hop can accumulate without returning NULL (which means "drop this
+	 * block" to libobs, not "hold and retry"). */
+	static const float silence[LVQE_MAX_FRAMES_PER_CHUNK] = {0};
+	uint64_t latency_frames_64 =
+		((uint64_t)LVQE_HOP * f->obs_rate + LVQE_RATE - 1) / LVQE_RATE;
+	uint32_t latency_frames = (uint32_t)latency_frames_64;
+	assert(latency_frames <= LVQE_MAX_FRAMES_PER_CHUNK);
+	for (size_t ch = 0; ch < f->obs_channels; ++ch)
+		deque_push_back(&f->out_obs[ch], silence,
+				(size_t)latency_frames * sizeof(float));
 
 	lvqe_update(f, settings);
 	return f;
@@ -771,30 +788,35 @@ static struct obs_audio_data *lvqe_filter_audio(void *data,
 	}
 
 	/* 5. Drain exactly `audio->frames` per channel into OBS's buffer.
-	 *    If we don't have that much yet, hold the chunk back (return
-	 *    NULL → OBS sees us as buffering). */
+	 *    Returning NULL drops the current block in libobs; it does not ask
+	 *    OBS to retry it.  The startup padding above should make underflow
+	 *    impossible during normal operation, but zero-fill any anomalous
+	 *    shortfall so timestamps and block cadence remain continuous. */
 	const size_t need = (size_t)audio->frames * sizeof(float);
-	if (f->out_obs[0].size < need)
-		return NULL;
+	if (f->out_obs[0].size < need) {
+		++f->output_underflows;
+		LVQE_BLOG(LOG_WARNING,
+			  "output underflow #%llu: have=%zu need=%zu frames "
+			  "(in16=%zu out16=%zu hops=%u)",
+			  (unsigned long long)f->output_underflows,
+			  f->out_obs[0].size / sizeof(float),
+			  (size_t)audio->frames,
+			  f->in_16k.size / sizeof(float),
+			  f->out_16k.size / sizeof(float), hops_done);
+	}
 	for (size_t ch = 0; ch < f->obs_channels && ch < MAX_AV_PLANES; ++ch) {
 		if (!audio->data[ch]) continue;
-		if (f->out_obs[ch].size >= need) {
-			deque_pop_front(&f->out_obs[ch],
-					audio->data[ch], need);
-		} else {
-			/* Channel-count mismatch in resampler output (shouldn't
-			 * happen given we built `up` for f->obs_channels) —
-			 * zero rather than leak whatever was in the buffer. */
-			memset(audio->data[ch], 0, need);
-		}
+		size_t available = f->out_obs[ch].size;
+		if (available > need) available = need;
+		if (available)
+			deque_pop_front(&f->out_obs[ch], audio->data[ch], available);
+		if (available < need)
+			memset(audio->data[ch] + available, 0, need - available);
 	}
 
-	/* Don't let timestamp underflow into garbage if OBS hands us a
-	 * very early chunk (e.g. start-of-stream). */
-	if (audio->timestamp >= f->latency_ns)
-		audio->timestamp -= f->latency_ns;
-	else
-		audio->timestamp = 0;
+	/* Keep OBS's timestamp unchanged.  The seeded silence represents the
+	 * real filter delay in the sample stream; back-dating each block makes
+	 * OBS's dynamic audio buffering grow in an attempt to compensate. */
 	return audio;
 }
 
