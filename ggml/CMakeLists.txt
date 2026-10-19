@@ -153,7 +153,7 @@ target_link_libraries(dvqe_model PUBLIC dvqe_common)
 
 # GGML graph model (streaming + batch inference)
 add_library(dvqe_graph STATIC localvqe_graph.cpp model_hash.cpp)
-target_link_libraries(dvqe_graph PUBLIC dvqe_common)
+target_link_libraries(dvqe_graph PUBLIC dvqe_common dvqe_model)
 
 # Main inference binary (CLI). Needs WAV I/O.
 if(SNDFILE_FOUND)
@@ -490,7 +490,11 @@ target_link_libraries(tap_debug PRIVATE dvqe_graph)
 # and reproducible against the committed regression fixture.
 set_source_files_properties(daf_frontend.cpp PROPERTIES
     COMPILE_OPTIONS "-ffp-contract=off")
-target_sources(dvqe_graph PRIVATE daf_frontend.cpp)
+target_sources(dvqe_graph PRIVATE daf_frontend.cpp native_engine.cpp)
+if(APPLE)
+    # native_engine.cpp uses vForce (vvexpf) for the vectorized SiLU.
+    target_link_libraries(dvqe_graph PUBLIC "-framework Accelerate")
+endif()
 add_executable(daf_cli daf_cli.cpp)
 target_link_libraries(daf_cli PRIVATE dvqe_graph)
 

@@ -42,12 +42,27 @@ int main(int argc, char** argv) {
             else if (a == "--rtol" && i + 1 < argc) rtol = (float)atof(argv[++i]);
         }
         if (!reg_in.empty()) {
-            const int N = 16000, hop = 256, K = 512;
-            std::vector<float> buf(2 * N);
+            // N is inferred from the input file size: the fixture holds N
+            // mic floats followed by N ref floats, so N = filesize / 8.
             FILE* f = fopen(reg_in.c_str(), "rb");
-            if (!f || fread(buf.data(), 4, 2 * N, f) != (size_t)2 * N) {
+            if (!f) {
                 fprintf(stderr, "bad --reg-input %s\n", reg_in.c_str());
-                if (f) fclose(f);
+                return 1;
+            }
+            fseek(f, 0, SEEK_END);
+            long fsize = ftell(f);
+            rewind(f);
+            if (fsize <= 0 || fsize % 8 != 0 || fsize / 8 > 0x7fffffffL) {
+                fprintf(stderr, "bad --reg-input %s: size %ld is not 2*N float32\n", reg_in.c_str(), fsize);
+                fclose(f);
+                return 1;
+            }
+            const int N = (int)(fsize / 8);
+            const int hop = 256, K = 512;
+            std::vector<float> buf(2 * N);
+            if (N <= 0 || fread(buf.data(), 4, 2 * N, f) != (size_t)2 * N) {
+                fprintf(stderr, "bad --reg-input %s\n", reg_in.c_str());
+                fclose(f);
                 return 1;
             }
             fclose(f);
